@@ -1,0 +1,75 @@
+_target_: src.models.object_watermark.ObjectWatermark
+
+encoder:
+  _target_: src.models.encoder.StegaStampEncoder
+  image_shape: [3, 256, 256]
+  secret_len: ${datamodule.dataset_cfg.msg_len}
+
+decoder:
+  _target_: src.models.decoder.StegaStampWoSTNDecoder
+  image_shape: [3, 256, 256]
+  secret_len: ${datamodule.dataset_cfg.msg_len}
+
+augmenter:
+  _target_: src.models.augmenter.Augmenter
+  image_aug_dict:
+    # MotionBlur:
+    #   _target_: kornia.augmentation.RandomMotionBlur
+    #   _partial_: True
+    #   # kernel_size: [3, 7] # Randomly choose a kernel size from 3 to 7
+    #   angle: 90.
+    #   direction: 0.5
+    #   p: 0.9
+    # ColorJitter:
+    #   _target_: kornia.augmentation.ColorJitter
+    #   brightness: 0.3
+    #   contrast: 0.5
+    #   saturation: 0.5
+    #   hue: 0.1
+    GaussianBlur:
+      _target_: kornia.augmentation.RandomGaussianBlur
+      kernel_size: 7
+      sigma: [0.1, 1.5]  # Randomly choose sigma from 0.1 to 2.0
+      p: 0.9
+    Noise:
+      _target_: kornia.augmentation.RandomGaussianNoise
+      mean: 0.
+      std: 0.02
+    JPEG:
+      _target_: src.models.augmenter.DiffJPEG.DiffJPEG.DiffJPEG
+      height: 256
+      width: 256
+      differentiable: True
+      quality: 50
+
+  mask_aug_dict: Erosion_Dilation([3,5,7], 0.5)
+
+  both_aug_dict:
+    Affine: # The transformation is computed so that the center is kept invariant
+      _target_: kornia.augmentation.RandomAffine
+      degrees: 10
+      # degrees: 60
+      # translate: [0.03, 0.03]
+      # translate: [0.1 , 0.1]
+      scale: [0.95, 1.05]
+      # scale: [0.8, 1.2]
+      # shear: 5.
+      # shear: 10.
+      p: 0.9
+
+
+  # _target_: src.models.augmenter.Augmenter
+  # aug_dict: null
+
+syncor:
+  # _target_: src.models.syncor.SpatialTransNet
+  # input_shape: [3, 256, 256]
+  _target_: src.models.syncor.PerspectiveTransformLayer
+  in_channels: 3
+
+msg_len: ${datamodule.dataset_cfg.msg_len}
+
+loss_cfg:
+  vis_weight: 1.
+  vis_delay_epoch: 40
+  msg_weight: 1.
