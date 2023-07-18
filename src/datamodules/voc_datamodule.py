@@ -189,7 +189,15 @@ def standardize_image_mask_v0():
     pass
 
 def standardize_image_mask():
-    # Standardize the image and mask by moments
+    # Standardize the image and mask by moments,
+    # 1. Get the centroid of the object by moments;
+    # 2. Pad the image and mask so as the object centroid is in the center of the image;
+    # 3. Calculate the principle axis of the object and rotate the image and mask;
+    # 4. Get the bounding box of the object;
+    # 5. Pad the image and mask so as a square is fitted to the bounding box;
+    # 6. Crop the center square from the image
+    # 7. Resize the image and mask to 256*256
+
 
     ob_img_dir = Path('/sda1/Datasets/VOC2012/Object/images')
     ob_mask_dir = Path('/sda1/Datasets/VOC2012/Object/masks')
@@ -200,6 +208,7 @@ def standardize_image_mask():
         img = cv2.cvtColor(cv2.imread(str(path)), cv2.COLOR_BGR2RGB)
         mask = cv2.cvtColor(cv2.imread(str(ob_mask_dir/path.name)), cv2.COLOR_BGR2GRAY)
 
+        mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)[1]
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         contours = sorted(contours, key=lambda x: cv2.contourArea(x), reverse=True)
         moments = cv2.moments(contours[0])
@@ -224,10 +233,11 @@ def standardize_image_mask():
 
         # Calculate the angle of the object
         theta = np.degrees(np.arctan2(2 * moments['mu11'], moments['mu20'] - moments['mu02']) / 2)
-        if theta < 0:
-            img = np.fliplr(img)
-            mask = np.fliplr(mask)
-            theta = -theta
+        # if theta < 0:
+        #     img = np.fliplr(img)
+        #     mask = np.fliplr(mask)
+        #     theta = -theta
+
         # Rotate the image and mask
         rotated_img = np.array(Image.fromarray(img).rotate(theta, resample=2, expand=True))
         rotated_mask = np.array(Image.fromarray(mask).rotate(theta, resample=2, expand=True))
@@ -390,8 +400,8 @@ class VOCDataset(Dataset):
         assert stage.lower() in ['train', 'val', 'test']
         data_dir = Path(data_dir)
         self.msg_len = msg_len
-        self.img_dir = data_dir / 'StandardObject' / 'images'
-        mask_dir = data_dir / 'StandardObject' / 'masks'
+        self.img_dir = data_dir / 'images'
+        mask_dir = data_dir / 'masks'
         mask_paths = list(mask_dir.glob('*.png'))
         random.shuffle(mask_paths)
         if stage.lower() == 'test':
@@ -402,14 +412,17 @@ class VOCDataset(Dataset):
             mask_paths = mask_paths[600:]
         self.mask_paths = mask_paths
 
+        self.to_tensor = transforms.ToTensor()
+
     def __len__(self):
         return len(self.mask_paths)
 
     def __getitem__(self, idx):
         img_path = self.img_dir / self.mask_paths[idx].name
         mask_path = self.mask_paths[idx]
-        img = transforms.ToTensor()(Image.open(img_path).convert('RGB'))
-        mask = transforms.ToTensor()(Image.open(mask_path).convert('L'))
+        img = self.to_tensor(cv2.imread(str(img_path))[:, :, ::-1])
+        mask = self.to_tensor(
+            cv2.threshold(cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE), 127, 255, cv2.THRESH_BINARY)[1])
         msg = torch.randint(0, 2, (self.msg_len,))
         return img, mask, msg
 

@@ -1,0 +1,9 @@
+_target_: src.datamodules.DUTSDataModule
+dataset_cfg:
+  data_dir: ${paths.data_dir}/DUTS
+  msg_len: ${model.msg_len}
+
+dataloader_cfg:
+  batch_size: 32
+  num_workers: 4
+  pin_memory: False

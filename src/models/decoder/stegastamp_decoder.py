@@ -66,6 +66,7 @@ class StegaStampWoSTNDecoder(nn.Module):
         )
 
     def forward(self, image, mask, normalize: bool = False):
+        image = image * mask
         if normalize:
             image = (image - 0.5) * 2.
         secret_logits = self.decoder(image)

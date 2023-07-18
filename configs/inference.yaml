@@ -1,0 +1,19 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - datamodule: voc_datamodule.yaml
+  - model: object_watermark.yaml
+  - callbacks: default.yaml
+  - logger: tensorboard.yaml # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
+  - trainer: gpu.yaml
+  - paths: default.yaml
+  - extras: default.yaml
+  - hydra: default.yaml
+
+task_name: "inference"
+
+tags: ["dev"]
+
+# passing checkpoint path is necessary for evaluation
+ckpt_path: /home/chengxin/Project/ObjectWatermark/logs/ckpt/2023-06-17_11-23-32/checkpoints/last.ckpt

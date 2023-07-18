@@ -28,12 +28,16 @@ def min_max_norm(x: torch.Tensor):
     return (x - x.min()) / (x.max() - x.min())
 
 
+LPIPS_FN = LPIPS(net='vgg')
+
+
 class ObjectWatermark(LightningModule):
-    def __init__(self, encoder: nn.Module,
+    def __init__(self, image_shape: Tuple[int, int, int],
+                 msg_len: int,
+                 encoder: nn.Module,
                  decoder: nn.Module,
                  augmenter: nn.Module,
                  syncor: nn.Module,
-                 msg_len: int,
                  loss_cfg: DictConfig):
         super().__init__()
         torch.set_float32_matmul_precision('high')
@@ -47,9 +51,6 @@ class ObjectWatermark(LightningModule):
         self.augmenter = augmenter
         self.syncor = syncor
         self.loss_cfg = loss_cfg
-
-        # Delay the initialization of lpips_fn to avoid saving it in ckpt
-        self.lpips_fn = None
 
         # Metrics
         self.train_psnr = PeakSignalNoiseRatio(data_range=1.0)
@@ -65,6 +66,25 @@ class ObjectWatermark(LightningModule):
     def forward(self, x: torch.Tensor):
         pass
 
+    def encode(self, image: torch.Tensor, mask: torch.Tensor, msg: torch.Tensor):
+        if len(image.shape) == 3 and len(mask.shape) == 3 and len(msg.shape) == 1:
+            image = image.unsqueeze(0)
+            mask = mask.unsqueeze(0)
+            msg = msg.unsqueeze(0)
+        assert len(image.shape) == 4 and len(mask.shape) == 4 and len(msg.shape) == 2
+        container, residual = self.encoder(image, mask, msg, normalize=True)
+        return container.squeeze(0), residual.squeeze(0)
+
+    def decode(self, container: torch.Tensor, mask: torch.Tensor):
+        if len(container.shape) == 3 and len(mask.shape) == 3:
+            container = container.unsqueeze(0)
+            mask = mask.unsqueeze(0)
+        assert len(container.shape) == 4 and len(mask.shape) == 4
+        container, mask = container.to(self.device), mask.to(self.device)
+        # FIXME:
+        # sync_container, sync_mask = self.syncor(container, mask, normalize=True)
+        return self.decoder(container, mask, normalize=True).squeeze(0)
+
     def on_train_start(self) -> None:
         # by default lightning executes validation step sanity checks before training starts,
         # so it's worth to make sure validation metrics don't store results from these checks
@@ -73,7 +93,9 @@ class ObjectWatermark(LightningModule):
         self.val_ssim.reset()
         self.val_bar.reset()
 
-        self.lpips_fn = LPIPS(net='vgg').to(self.device)
+        # Using global variable to avoid saving model in pickle
+        global LPIPS_FN
+        LPIPS_FN = LPIPS_FN.to(self.device)
 
     def shared_step(self, batch: Any):
         host, mask, msg = batch
@@ -95,7 +117,7 @@ class ObjectWatermark(LightningModule):
 
         # Calculate loss
         # Encode loss
-        vis_loss = F.l1_loss(host, container) + self.lpips_fn(host, container, normalize=True).mean()
+        vis_loss = F.l1_loss(host, container) + LPIPS_FN(host, container, normalize=True).mean()
         vis_loss = vis_loss * self.loss_cfg.vis_weight if self.current_epoch >= self.loss_cfg.vis_delay_epoch else 0.
         # Decode loss
         msg_loss = F.binary_cross_entropy_with_logits(msg_hat_logit, msg.float()) * self.loss_cfg.msg_weight

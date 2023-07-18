@@ -1,14 +1,17 @@
 _target_: src.models.object_watermark.ObjectWatermark
 
+image_shape: [3, 256, 256]
+msg_len: 32
+
 encoder:
   _target_: src.models.encoder.StegaStampEncoder
-  image_shape: [3, 256, 256]
-  secret_len: ${datamodule.dataset_cfg.msg_len}
+  image_shape: ${model.image_shape}
+  secret_len: ${model.msg_len}
 
 decoder:
   _target_: src.models.decoder.StegaStampWoSTNDecoder
-  image_shape: [3, 256, 256]
-  secret_len: ${datamodule.dataset_cfg.msg_len}
+  image_shape: ${model.image_shape}
+  secret_len: ${model.msg_len}
 
 augmenter:
   _target_: src.models.augmenter.Augmenter
@@ -42,8 +45,6 @@ augmenter:
       differentiable: True
       quality: 50
 
-  mask_aug_dict: Erosion_Dilation([3,5,7], 0.5)
-
   both_aug_dict:
     Affine: # The transformation is computed so that the center is kept invariant
       _target_: kornia.augmentation.RandomAffine
@@ -57,6 +58,8 @@ augmenter:
       # shear: 10.
       p: 0.9
 
+  mask_aug_dict: Erosion_Dilation([3,5,7], 0.5)
+
 
   # _target_: src.models.augmenter.Augmenter
   # aug_dict: null
@@ -66,8 +69,6 @@ syncor:
   # input_shape: [3, 256, 256]
   _target_: src.models.syncor.PerspectiveTransformLayer
   in_channels: 3
-
-msg_len: ${datamodule.dataset_cfg.msg_len}
 
 loss_cfg:
   vis_weight: 1.

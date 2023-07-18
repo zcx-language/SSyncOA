@@ -9,7 +9,9 @@
 # @CreateTime   : 2023/5/11 10:11
 
 # Import lib here
+from .standard_object import standard_object
 from .voc_datamodule import VOCDataModule
+from .duts_datamodule import DUTSDataModule
 
 
 def run():

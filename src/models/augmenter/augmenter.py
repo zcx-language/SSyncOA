@@ -49,19 +49,19 @@ class Augmenter(nn.Module):
             if return_individual:
                 distorted_img_dict[aug_name] = aug(orig_img).clamp(0., 1.)
 
-        # Distorting mask
+        # Distorting both
         distorted_mask = mask
+        for aug_name, aug in self.both_aug_dict.items():
+            distorted_img = aug(distorted_img).clamp(0., 1.)
+            distorted_mask = aug(distorted_mask, params=aug._params).clamp(0., 1.)
+
+        # Distorting mask
         kernel_size = random.choice([3, 5, 7])
         kernel = torch.ones((kernel_size, kernel_size)).to(mask.device)
         if torch.rand(1).item() <= 0.5:
             distorted_mask = erosion(distorted_mask, kernel)
         else:
             distorted_mask = dilation(distorted_mask, kernel)
-
-        # Distorting both
-        for aug_name, aug in self.both_aug_dict.items():
-            distorted_img = aug(distorted_img).clamp(0., 1.)
-            distorted_mask = aug(distorted_mask, params=aug._params).clamp(0., 1.)
 
         if return_individual:
             distorted_img_dict['combine'] = distorted_img

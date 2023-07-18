@@ -1,7 +1,7 @@
 _target_: src.datamodules.VOCDataModule
 dataset_cfg:
-  data_dir: ${paths.data_dir}/VOC2012
-  msg_len: 32
+  data_dir: ${paths.data_dir}/VOC2012/StandardObject/
+  msg_len: ${model.msg_len}
 
 dataloader_cfg:
   batch_size: 32
