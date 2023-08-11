@@ -28,20 +28,24 @@ from typing import Tuple, Optional, List, Dict, Any
 
 class DUTSDataset(Dataset):
     def __init__(self, data_dir: str,
+                 image_shape: Tuple[int, int, int] = (3, 256, 256),
                  msg_len: int = 32,
+                 repeat: int = 8,
                  stage: str = 'train'):
         super().__init__()
         assert stage.lower() in ['train', 'val', 'test']
         data_dir = Path(data_dir)
+        self.image_shape = image_shape
         self.msg_len = msg_len
+        self.repeat = repeat
 
         if stage.lower() == 'train':
-            img_dir = data_dir / 'DUTS-TR' / 'Std-Image'
-            mask_dir = data_dir / 'DUTS-TR' / 'Std-Mask'
+            img_dir = data_dir / 'DUTS-TR' / 'Std-Image-30'
+            mask_dir = data_dir / 'DUTS-TR' / 'Std-Mask-30'
             mask_paths = sorted(mask_dir.glob('*.png'))
         else:
-            img_dir = data_dir / 'DUTS-TE' / 'Std-Image'
-            mask_dir = data_dir / 'DUTS-TE' / 'Std-Mask'
+            img_dir = data_dir / 'DUTS-TE' / 'Std-Image-30'
+            mask_dir = data_dir / 'DUTS-TE' / 'Std-Mask-30'
             mask_paths = sorted(mask_dir.glob('*.png'))
 
             mask_num = len(mask_paths)
@@ -52,6 +56,10 @@ class DUTSDataset(Dataset):
 
         self.img_dir = img_dir
         self.mask_paths = mask_paths
+
+        bg_image_dir = data_dir / 'DUTS-TR' / 'DUTS-TR-Image'
+        self.bg_image_paths = list(bg_image_dir.glob('*.jpg'))
+        self.num_bg_images = len(self.bg_image_paths)
 
         self.to_tensor = transforms.ToTensor()
 
@@ -65,8 +73,18 @@ class DUTSDataset(Dataset):
             cv2.cvtColor(cv2.imread(str(img_path)), cv2.COLOR_BGR2RGB))
         mask = self.to_tensor(
             cv2.threshold(cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE), 127, 255, cv2.THRESH_BINARY)[1])
-        msg = torch.randint(0, 2, (self.msg_len,))
-        return img, mask, msg
+        msg = torch.randint(0, 2, (self.repeat, self.msg_len))
+        bg_img = []
+        for _ in range(self.repeat):
+            bg_img_path = random.choice(self.bg_image_paths)
+            bg_img.append(self.to_tensor(
+                cv2.resize(cv2.cvtColor(cv2.imread(str(bg_img_path)), cv2.COLOR_BGR2RGB), (512, 512))))
+        bg_img = torch.stack(bg_img, dim=0)
+        # img: (3, H, W)
+        # mask: (1, H, W)
+        # mask: (self.repeat, len)
+        # gb_img: (self.repeat, 3, 512, 512)
+        return img, mask, msg, bg_img
 
 
 class DUTSDataModule(LightningDataModule):
@@ -118,24 +136,24 @@ def run():
     import pdb
 
     # Standard object
-    image_dir = '/sda1/Datasets/DUTS/DUTS-TE/DUTS-TE-Image'
-    mask_dir = '/sda1/Datasets/DUTS/DUTS-TE/DUTS-TE-Mask'
-    output_dir = '/sda1/Datasets/DUTS/DUTS-TE/'
+    # image_dir = '/sda1/Datasets/DUTS/DUTS-TE/DUTS-TE-Image'
+    # mask_dir = '/sda1/Datasets/DUTS/DUTS-TE/DUTS-TE-Mask'
+    # output_dir = '/sda1/Datasets/DUTS/DUTS-TE/'
 
-    image_paths = sorted(Path(image_dir).glob('*.jpg'))
-    mask_paths = sorted(Path(mask_dir).glob('*.png'))
+    # image_paths = sorted(Path(image_dir).glob('*.jpg'))
+    # mask_paths = sorted(Path(mask_dir).glob('*.png'))
 
-    for img_path, mask_path in tqdm(zip(image_paths, mask_paths)):
-        img = cv2.imread(str(img_path))[..., ::-1]
-        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-        mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)[1]
+    # for img_path, mask_path in tqdm(zip(image_paths, mask_paths)):
+    #     img = cv2.imread(str(img_path))[..., ::-1]
+    #     mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+    #     mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)[1]
 
-        std_img, std_mask = standard_object(img, mask)
+    #     std_img, std_mask = standard_object(img, mask)
 
-        cv2.imwrite(str(Path(output_dir) / 'Std-Image' / img_path.name),
-                    std_img[..., ::-1], [cv2.IMWRITE_JPEG_QUALITY, 100])
-        cv2.imwrite(str(Path(output_dir) / 'Std-Mask' / mask_path.name),
-                    std_mask, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+    #     cv2.imwrite(str(Path(output_dir) / 'Std-Image' / img_path.name),
+    #                 std_img[..., ::-1], [cv2.IMWRITE_JPEG_QUALITY, 100])
+    #     cv2.imwrite(str(Path(output_dir) / 'Std-Mask' / mask_path.name),
+    #                 std_mask, [cv2.IMWRITE_PNG_COMPRESSION, 0])
 
 
     # duts_dataset = DUTSDataset('/sda1/Datasets/VOC2012')

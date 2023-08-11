@@ -32,12 +32,10 @@ LPIPS_FN = LPIPS(net='vgg')
 
 
 class ObjectWatermark(LightningModule):
-    def __init__(self, image_shape: Tuple[int, int, int],
-                 msg_len: int,
-                 encoder: nn.Module,
-                 decoder: nn.Module,
+    def __init__(self, encoder: nn.Module,
                  augmenter: nn.Module,
                  syncor: nn.Module,
+                 decoder: nn.Module,
                  loss_cfg: DictConfig):
         super().__init__()
         torch.set_float32_matmul_precision('high')
@@ -47,6 +45,8 @@ class ObjectWatermark(LightningModule):
         # self.save_hyperparameters(logger=False)
 
         self.encoder = encoder
+        msg_len = encoder.msg_len
+
         self.decoder = decoder
         self.augmenter = augmenter
         self.syncor = syncor
@@ -101,8 +101,10 @@ class ObjectWatermark(LightningModule):
         host, mask, msg = batch
         # Encode
         container, residual = self.encoder(host, mask, msg, normalize=True)
+
         # Augment
         aug_container, aug_mask = self.augmenter(container, mask, self.trainer.fit_loop.total_batch_idx)
+
         # Decode
         sync_container, sync_mask = self.syncor(aug_container, aug_mask, normalize=True)
         msg_hat_logit = self.decoder(sync_container, sync_mask, normalize=False)
@@ -262,7 +264,13 @@ class ObjectWatermark(LightningModule):
 
     def visualize2logger(self, stage: str, image_dict: Dict, step: int):
         for label, image in image_dict.items():
-            self.logger_instance.add_images(f'{stage}/{label}', image, step)
+            if len(image.ndim) == 4:
+                self.logger_instance.add_images(f'{stage}/{label}', image, step)
+            elif len(image.ndim) == 3:
+                self.logger_instance.add_image(f'{stage}/{label}', image, step)
+            else:
+                raise ValueError
+
 
 
 def run():

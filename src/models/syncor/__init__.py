@@ -11,6 +11,10 @@
 # Import lib here
 from .perspective_transform_layer import PerspectiveTransformLayer
 from .spatial_transformer_network import SpatialTransNet
+from .bbox_stn import BBoxSTN
+from .central_moment import CentralMoment
+from .no_sync import NoSync
+from .smp_unet import SMPUNet
 
 
 def run():

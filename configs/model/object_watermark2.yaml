@@ -1,0 +1,105 @@
+_target_: src.models.object_watermark2.ObjectWatermark2
+
+model_cfg:
+  image_shape: ${datamodule.dataset_cfg.image_shape}
+  msg_len: ${datamodule.dataset_cfg.msg_len}
+  adopt_seg_delay_epoch: 1
+
+encoder:
+  _target_: src.models.encoder.StegaStampEncoder
+  image_shape: ${model.model_cfg.image_shape}
+  secret_len: ${model.model_cfg.msg_len}
+  deformable_conv: False
+  multi_level_embed: False
+  mask_residual: True
+  embed_factor: 1.  # Set to None for auto regression
+  # _target_: src.models.encoder.UNetArch
+  # msg_len: ${model.model_cfg.msg_len}
+  # reduction: 16
+  # deformable: False
+
+decoder:
+  _target_: src.models.decoder.StegaStampWoSTNDecoder
+  image_shape: ${model.model_cfg.image_shape}
+  secret_len: ${model.model_cfg.msg_len}
+  deformable_conv: ${model.encoder.deformable_conv}}
+  # _target_: src.models.decoder.HiDDeNDecoder
+  # msg_len: ${model.model_cfg.msg_len}
+
+augmenter:
+  # _target_: src.models.augmenter.Augmenter
+  # _target_: src.models.augmenter.GeometricCopypasteNoise
+  _target_: src.models.augmenter.RandomSelectAugmenter
+
+  aug_dict:
+    Translate:
+      # Have done in copy-paste process
+      _target_: torch.nn.Identity
+    Affine:
+      _target_: kornia.augmentation.RandomAffine
+      degrees: 45
+      # translate: [0.2, 0.2]
+      scale: [0.75, 1.5]
+      # shear: 10.
+      same_on_batch: false
+
+    # MotionBlur:
+    #   _target_: kornia.augmentation.RandomMotionBlur
+    #   _partial_: True
+    #   # kernel_size: [3, 7] # Randomly choose a kernel size from 3 to 7
+    #   angle: 90.
+    #   direction: 0.5
+    #   p: 0.9
+    # ColorJitter:
+    #   _target_: kornia.augmentation.ColorJitter
+    #   brightness: 0.3
+    #   contrast: 0.5
+    #   saturation: 0.5
+    #   hue: 0.1
+    GaussianBlur:
+      _target_: kornia.augmentation.RandomGaussianBlur
+      kernel_size: [7, 7]
+      sigma: [0.1, 2.0]  # Randomly choose sigma from 0.1 to 2.0
+    Noise:
+      _target_: kornia.augmentation.RandomGaussianNoise
+      mean: 0.
+      std: 0.05
+    JPEG:
+      _target_: src.models.augmenter.DiffJPEG.DiffJPEG.DiffJPEG
+      height: 512
+      width: 512
+      differentiable: True
+      quality: 50
+
+segmenter:
+  _target_: src.models.segmenter.SMPUNet
+
+
+syncor:
+  # _target_: src.models.syncor.SpatialTransNet
+  # input_shape: [3, 256, 256]
+  # _target_: src.models.syncor.PerspectiveTransformLayer
+  # in_channels: 1
+  # _target_: src.models.syncor.BBoxSTN
+  # in_channels: 1
+  # output_size: [256, 256]
+  _target_: src.models.syncor.CentralMoment
+  output_size: [256, 256]
+  # _target_: src.models.syncor.NoSync
+
+syncor2:
+  _target_: src.models.syncor.SMPUNet
+
+loss_fn:
+  pix_loss:
+    _target_: torch.nn.MSELoss
+    # _target_: src.models.loss_funcs.WeightedYUVLoss
+    # weights: [1, 10, 10]
+    # dist_type: l2
+
+loss_cfg:
+  vis_weight: 1.
+  vis_delay_batch: 1000
+  msg_weight: 100.
+  seg_weight: 1.
+  sync_weight: 1.

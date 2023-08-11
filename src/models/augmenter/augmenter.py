@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import random
 
 # @Project      : ObjectWatermark
 # @File         : augmenter.py
@@ -10,6 +9,7 @@ import random
 # @CreateTime   : 2023/5/31 16:51
 
 # Import lib here
+import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -22,14 +22,11 @@ from typing import List, Dict, Optional
 
 
 class Augmenter(nn.Module):
-    def __init__(self, image_aug_dict: DictConfig,
-                 mask_aug_dict: DictConfig,
-                 both_aug_dict: DictConfig):
+    def __init__(self, noise_aug_dict: DictConfig,
+                 geometric_aug_dict: DictConfig):
         super().__init__()
-        if image_aug_dict.get('MotionBlur', None):
-            image_aug_dict['MotionBlur'] = image_aug_dict['MotionBlur'](kernel_size=(3, 7))
-        self.image_aug_dict = nn.ModuleDict(image_aug_dict)
-        self.both_aug_dict = nn.ModuleDict(both_aug_dict)
+        self.noise_aug_dict = nn.ModuleDict(noise_aug_dict)
+        self.geometric_aug_dict = nn.ModuleDict(geometric_aug_dict)
 
     @property
     def distortion_types(self):
@@ -37,6 +34,7 @@ class Augmenter(nn.Module):
 
     def forward(self, image: torch.Tensor,
                 mask: torch.Tensor,
+                background_image: torch.Tensor,
                 batch_idx: int,
                 return_individual: bool = False):
         orig_img = torch.clone(image)
@@ -44,29 +42,29 @@ class Augmenter(nn.Module):
         # Distorting image
         distorted_img = image
         distorted_img_dict = dict()
-        for aug_name, aug in self.image_aug_dict.items():
+        for aug_name, aug in self.noise_aug_dict.items():
             distorted_img = aug(distorted_img).clamp(0., 1.)
             if return_individual:
                 distorted_img_dict[aug_name] = aug(orig_img).clamp(0., 1.)
 
         # Distorting both
         distorted_mask = mask
-        for aug_name, aug in self.both_aug_dict.items():
+        for aug_name, aug in self.geometric_aug_dict.items():
             distorted_img = aug(distorted_img).clamp(0., 1.)
             distorted_mask = aug(distorted_mask, params=aug._params).clamp(0., 1.)
 
         # Distorting mask
-        kernel_size = random.choice([3, 5, 7])
-        kernel = torch.ones((kernel_size, kernel_size)).to(mask.device)
-        if torch.rand(1).item() <= 0.5:
-            distorted_mask = erosion(distorted_mask, kernel)
-        else:
-            distorted_mask = dilation(distorted_mask, kernel)
+        # kernel_size = random.choice([3, 5, 7])
+        # kernel = torch.ones((kernel_size, kernel_size)).to(mask.device)
+        # if torch.rand(1).item() <= 0.5:
+        #     distorted_mask = erosion(distorted_mask, kernel)
+        # else:
+        #     distorted_mask = dilation(distorted_mask, kernel)
 
         if return_individual:
             distorted_img_dict['combine'] = distorted_img
             return distorted_img_dict, distorted_mask
-        return distorted_img, distorted_mask
+        return distorted_img, distorted_mask.ge(0.5).int()
 
 
 def run():

@@ -1,9 +1,11 @@
 _target_: src.datamodules.DUTSDataModule
 dataset_cfg:
   data_dir: ${paths.data_dir}/DUTS
-  msg_len: ${model.msg_len}
+  image_shape: [3, 256, 256]
+  msg_len: 30
+  repeat: 8   # real batch size, each batch for each object
 
 dataloader_cfg:
-  batch_size: 32
+  batch_size: 1
   num_workers: 4
   pin_memory: False

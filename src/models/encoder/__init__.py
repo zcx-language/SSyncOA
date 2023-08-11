@@ -12,6 +12,7 @@
 from .pimog_encoder import PIMoGEncoder
 from .hidden_encoder import HiDDeNEncoder
 from .stegastamp_encoder import StegaStampEncoder, StegaStampEncoderV2
+from .unet_arch_encoder import UNetArchEncoder
 
 
 def run():

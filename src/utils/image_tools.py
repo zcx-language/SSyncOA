@@ -26,6 +26,10 @@ img_norm = transforms.Normalize(0.5, 0.5)
 img_denorm = transforms.Normalize(-1, 2)
 
 
+def img_min_max_norm(x: torch.Tensor):
+    return (x - x.min()) / (x.max() - x.min())
+
+
 def image_tensor2numpy(tensor: torch.Tensor, normalize: bool = False, value_range: Optional[Tuple[int, int]] = None,
                        scale_each: bool = True, keep_dims: bool = False) -> np.ndarray:
     """Converts a PyTorch tensor to a numpy image, it always squeezes the channel dimension.

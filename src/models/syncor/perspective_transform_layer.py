@@ -37,10 +37,11 @@ class PerspectiveTransformLayer(nn.Module):
     def forward(self, inputs: torch.Tensor,
                 mask: torch.Tensor,
                 normalize: bool = False):
-        inputs = inputs * mask
         if normalize:
             inputs = (inputs - 0.5) * 2.
-        theta = self.regressor(inputs).reshape(-1, 3, 3)
+            mask = (mask - 0.5) * 2.
+        # theta = self.regressor(inputs*mask).reshape(-1, 3, 3)
+        theta = self.regressor(mask).reshape(-1, 3, 3)
         warped_inputs = warp_perspective(inputs, theta, dsize=(inputs.shape[2], inputs.shape[3]))
         warped_mask = warp_perspective(mask, theta, dsize=(inputs.shape[2], inputs.shape[3]))
         return warped_inputs, warped_mask

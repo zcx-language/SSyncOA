@@ -58,11 +58,6 @@ def standard_object(image: np.ndarray, mask: np.ndarray):
 
     # Calculate the angle of the object
     theta = np.degrees(np.arctan2(2 * moments['mu11'], moments['mu20'] - moments['mu02']) / 2)
-    # FIXME: Why need to flip the image? Make no sense
-    # if theta < 0:
-    #     img = np.fliplr(img)
-    #     mask = np.fliplr(mask)
-    #     theta = -theta
 
     # Rotate the image and mask
     rotated_img = np.array(Image.fromarray(img).rotate(theta, resample=2, expand=True))

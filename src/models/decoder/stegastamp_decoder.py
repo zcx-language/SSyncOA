@@ -9,7 +9,7 @@
 # Import lib here
 import math
 import torch.nn as nn
-from src.models.components.basic_block import Conv2D, Dense, Flatten
+from src.models.components.basic_block import Conv2D, Dense, Flatten, DeformableConv2D
 from src.models.syncor.spatial_transformer_network import SpatialTransNet
 from src.models.syncor.perspective_transform_layer import PerspectiveTransformLayer
 from typing import Tuple
@@ -46,27 +46,32 @@ class StegaStampDecoder(nn.Module):
 
 
 class StegaStampWoSTNDecoder(nn.Module):
-    def __init__(self, image_shape: Tuple[int, int, int], secret_len: int = 100):
+    def __init__(self, image_shape: Tuple[int, int, int], secret_len: int = 100, deformable_conv: bool = False):
         super().__init__()
         in_channels, height, width = image_shape
         self.secret_len = secret_len
         flatten_dims = 128 * math.ceil(height / 32) * math.ceil(width / 32)
 
+        if deformable_conv:
+            conv_blk = DeformableConv2D
+        else:
+            conv_blk = Conv2D
+
         self.decoder = nn.Sequential(
-            Conv2D(3, 32, 3, strides=2, activation='relu'),
-            Conv2D(32, 32, 3, activation='relu'),
-            Conv2D(32, 64, 3, strides=2, activation='relu'),
-            Conv2D(64, 64, 3, activation='relu'),
-            Conv2D(64, 64, 3, strides=2, activation='relu'),
-            Conv2D(64, 128, 3, strides=2, activation='relu'),
-            Conv2D(128, 128, 3, strides=2, activation='relu'),
+            conv_blk(3, 32, 3, strides=2, activation='relu'),
+            conv_blk(32, 32, 3, activation='relu'),
+            conv_blk(32, 64, 3, strides=2, activation='relu'),
+            conv_blk(64, 64, 3, activation='relu'),
+            conv_blk(64, 64, 3, strides=2, activation='relu'),
+            conv_blk(64, 128, 3, strides=2, activation='relu'),
+            conv_blk(128, 128, 3, strides=2, activation='relu'),
             Flatten(),
             Dense(flatten_dims, 512, activation='relu'),
             Dense(512, secret_len, activation=None)
         )
 
     def forward(self, image, mask, normalize: bool = False):
-        image = image * mask
+        image = image * mask.ge(0.5).int()
         if normalize:
             image = (image - 0.5) * 2.
         secret_logits = self.decoder(image)

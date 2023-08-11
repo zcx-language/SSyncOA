@@ -1,7 +1,7 @@
 _target_: src.models.object_watermark.ObjectWatermark
 
 image_shape: [3, 256, 256]
-msg_len: 32
+msg_len: 30
 
 encoder:
   _target_: src.models.encoder.StegaStampEncoder
@@ -63,6 +63,7 @@ augmenter:
 
   # _target_: src.models.augmenter.Augmenter
   # aug_dict: null
+
 
 syncor:
   # _target_: src.models.syncor.SpatialTransNet
