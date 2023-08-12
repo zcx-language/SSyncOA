@@ -40,33 +40,40 @@ class SpatialTransNet(nn.Module):
             nn.ReLU(True)
         )
 
-        self.sqz_height = height // 16
-        self.sqz_width = width // 16
+        sqz_height = height // 16
+        sqz_width = width // 16
         # Regressor for the 3 * 2 affine matrix
         self.fc_loc = nn.Sequential(
-            nn.Linear(self.sqz_height * self.sqz_width, 32),
+            nn.Flatten(),
+            nn.Linear(sqz_height*sqz_width, 32),
             nn.ReLU(True),
             nn.Linear(32, 3 * 2)
         )
 
         # Initialize the weights/bias with identity transformation
-        self.fc_loc[2].weight.data.zero_()
-        self.fc_loc[2].bias.data.copy_(torch.tensor([1, 0, 0, 0, 1, 0], dtype=torch.float))
+        self.fc_loc[3].weight.data.zero_()
+        self.fc_loc[3].bias.data.copy_(torch.tensor([1, 0, 0, 0, 1, 0], dtype=torch.float))
 
     # Spatial transformer network forward function
-    def forward(self, x, mask, normalize: bool = False):
-        x = x * mask
+    # def forward(self, x, mask, normalize: bool = False):
+    #     x = x * mask
+    #     if normalize:
+    #         x = (x - 0.5) * 2.
+    #     xs = self.localization(x)
+    #     xs = xs.view(-1, self.sqz_height * self.sqz_width)
+    #     theta = self.fc_loc(xs)
+    #     theta = theta.view(-1, 2, 3)
+
+    #     grid = F.affine_grid(theta, x.size())
+    #     x = F.grid_sample(x, grid)
+    #     mask = F.grid_sample(mask, grid)
+    #     return x, mask
+    def forward(self, x, normalize: bool = False):
         if normalize:
             x = (x - 0.5) * 2.
-        xs = self.localization(x)
-        xs = xs.view(-1, self.sqz_height * self.sqz_width)
-        theta = self.fc_loc(xs)
-        theta = theta.view(-1, 2, 3)
-
-        grid = F.affine_grid(theta, x.size())
-        x = F.grid_sample(x, grid)
-        mask = F.grid_sample(mask, grid)
-        return x, mask
+        theta = self.fc_loc(self.localization(x))
+        grid = F.affine_grid(theta.reshape(-1, 2, 3), x.shape)
+        return F.grid_sample(x, grid)
 
 
 def test():

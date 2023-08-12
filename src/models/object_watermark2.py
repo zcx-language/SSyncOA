@@ -20,6 +20,7 @@ from torchmetrics import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.classification import MultilabelAccuracy, BinaryJaccardIndex
 from omegaconf import DictConfig
 from lpips import LPIPS
+from src.models.discriminator import Discriminator
 from typing import Tuple, List, Any, Dict
 
 from src.utils import get_pylogger
@@ -32,6 +33,7 @@ def min_max_norm(x: torch.Tensor):
 
 
 LPIPS_FN = LPIPS(net='vgg')
+DISCRIMINATOR = Discriminator(in_channels=3)
 
 
 class ObjectWatermark2(LightningModule):
@@ -129,8 +131,9 @@ class ObjectWatermark2(LightningModule):
         self.val_iou2.reset()
 
         # Using global variable to avoid saving model in pickle
-        global LPIPS_FN
+        global LPIPS_FN, DISCRIMINATOR
         LPIPS_FN = LPIPS_FN.to(self.device)
+        DISCRIMINATOR = DISCRIMINATOR.to(self.device)
 
     def shared_step(self, batch: Any, phase: str = 'train'):
         host, mask, msg, bg_img = batch
@@ -155,7 +158,7 @@ class ObjectWatermark2(LightningModule):
 
             # Sync
             object_mask = _aug_mask.ge(0.5).int()
-            if self.current_epoch >= self.model_cfg.adopt_seg_delay_epoch:
+            if self.total_steps >= self.model_cfg.adopt_seg_delay_step:
                 for idx, seg_mask_logit in enumerate(seg_mask_logits):
                     seg_mask = seg_mask_logit.sigmoid().ge(0.5).int()
                     if seg_mask.sum() >= 1e4:   # Filter out abnormal seg mask
@@ -168,12 +171,12 @@ class ObjectWatermark2(LightningModule):
             return seg_mask_logits, sync_object_patch, sync_mask_patch, msg_hat_logit, sync_mask_patch2
 
         if phase == 'train' or phase == 'val':
-            aug_dict = self.augmenter(container, mask, bg_img, self.trainer.fit_loop.total_batch_idx)
+            aug_dict = self.augmenter(container, mask, bg_img, self.total_steps)
             aug_container, aug_mask = list(aug_dict.values())[0]
             return (host, mask, msg, container, residual,
                     aug_container, aug_mask, *seg_sync_decode(aug_container, aug_mask))
         elif phase == 'test':
-            aug_dict = self.augmenter(container, mask, bg_img, self.trainer.fit_loop.total_batch_idx, return_all=True)
+            aug_dict = self.augmenter(container, mask, bg_img, self.total_steps, return_all=True)
             seg_mask_logits_dict, sync_object_patch_dict, sync_mask_patch_dict, msg_hat_logit_dict = {}, {}, {}, {}
             for aug_name, (aug_container, aug_mask) in aug_dict.items():
                 (seg_mask_logits_dict[aug_name], sync_object_patch_dict[aug_name],
@@ -188,14 +191,20 @@ class ObjectWatermark2(LightningModule):
         (host, mask, msg, container, residual, aug_container, aug_mask, seg_mask_logits,
          sync_object_patch, sync_mask_patch, msg_hat_logit, sync_mask_patch2) = self.shared_step(batch, phase='train')
 
-        current_batch_idx = self.trainer.fit_loop.total_batch_idx
         enc_dec_optim, seg_sync_optim = self.optimizers()
 
+        if batch_idx % 3 == 0:
+            dis_loss = DISCRIMINATOR.optimize_parameters(container*mask, host*mask)
+            self.log('train/dis_loss', dis_loss)
+
         # Calculate loss
-        mask_weight = (1 - mask) * 1e4 + torch.ones_like(mask)
+        # Encode loss
+        erosion_kernel = torch.ones(5, 5, device=self.device)   # erase the border effect
+        mask_weight = (1 - K.morphology.erosion(mask, erosion_kernel)) * 1e4 + torch.ones_like(mask)
         vis_loss = (self.loss_fn.pix_loss(residual*mask_weight, torch.zeros_like(residual)) +
-                    LPIPS_FN(container, host, normalize=True).mean())
-        vis_loss = vis_loss * self.loss_cfg.vis_weight if current_batch_idx > self.loss_cfg.vis_delay_batch else 0.
+                    LPIPS_FN(container, host, normalize=True).mean() +
+                    -DISCRIMINATOR(container*mask).mean())
+        vis_loss = vis_loss * self.loss_cfg.vis_weight if self.total_steps > self.loss_cfg.vis_delay_step else 0.
         # Decode loss
         msg_loss = F.binary_cross_entropy_with_logits(msg_hat_logit, msg.float()) * self.loss_cfg.msg_weight
         enc_dec_optim.zero_grad()
@@ -229,7 +238,7 @@ class ObjectWatermark2(LightningModule):
 
         # Visualize
         image_size = self.model_cfg.image_shape[-2:]
-        if current_batch_idx % 300 == 0:
+        if self.total_steps % 300 == 0:
             show_image = dict(
                 bg1=torch.cat([
                     host[:1] * mask[:1], min_max_norm(residual[:1]), container[:1],
@@ -246,7 +255,7 @@ class ObjectWatermark2(LightningModule):
                     sync_mask_patch2.sigmoid()[1:2].repeat(1, 3, 1, 1)
                 ], dim=0),
             )
-            self.visualize2logger('train', show_image, current_batch_idx)
+            self.visualize2logger('train', show_image, self.total_steps)
 
     def on_train_epoch_end(self) -> None:
         # `outputs` is a list of dicts returned from `training_step()`
@@ -284,7 +293,7 @@ class ObjectWatermark2(LightningModule):
                     sync_mask_patch2.sigmoid()[:1].repeat(1, 3, 1, 1)
                 ], dim=0),
             )
-            self.visualize2logger('val/ob1', show_image, self.current_epoch)
+            self.visualize2logger('val/ob1', show_image, self.total_steps)
         if batch_idx == 1:
             show_image = dict(
                 bg1=torch.cat([
@@ -295,7 +304,7 @@ class ObjectWatermark2(LightningModule):
                     sync_mask_patch2.sigmoid()[:1].repeat(1, 3, 1, 1)
                 ], dim=0),
             )
-            self.visualize2logger('val/ob2', show_image, self.current_epoch)
+            self.visualize2logger('val/ob2', show_image, self.total_steps)
 
     def on_validation_epoch_end(self) -> None:
         psnr = self.val_psnr.compute()
@@ -310,14 +319,20 @@ class ObjectWatermark2(LightningModule):
         self.val_iou.reset()
         self.val_iou2.reset()
 
-        self.logger_instance.add_scalar('val/psnr', psnr, self.current_epoch)
-        self.logger_instance.add_scalar('val/ssim', ssim, self.current_epoch)
-        self.logger_instance.add_scalar('val/bar', bar, self.current_epoch)
-        self.logger_instance.add_scalar('val/iou', iou, self.current_epoch)
-        self.logger_instance.add_scalar('val/iou2', iou2, self.current_epoch)
+        self.logger_instance.add_scalar('val/psnr', psnr, self.total_steps)
+        self.logger_instance.add_scalar('val/ssim', ssim, self.total_steps)
+        self.logger_instance.add_scalar('val/bar', bar, self.total_steps)
+        self.logger_instance.add_scalar('val/iou', iou, self.total_steps)
+        self.logger_instance.add_scalar('val/iou2', iou2, self.total_steps)
+
+        # Log for checkpoint callback
+        self.log('hp_metric', bar+(psnr/50))
+        self.log('step', self.total_steps, logger=False)
+        self.log('psnr', psnr, logger=False)
+        self.log('bar', bar, logger=False)
 
         # Log to file
-        log.info(f'Epoch {self.current_epoch}: psnr={psnr:.4f}, ssim={ssim:.4f}, bar={bar:.4f}, iou={iou:.4f}, iou2={iou2:.4f}')
+        log.info(f'Step: {self.total_steps}: psnr={psnr:.4f}, ssim={ssim:.4f}, bar={bar:.4f}, iou={iou:.4f}, iou2={iou2:.4f}')
         pass
 
     def on_test_start(self) -> None:
@@ -364,8 +379,8 @@ class ObjectWatermark2(LightningModule):
         ssim = self.test_ssim.compute()
         self.test_psnr.reset()
         self.test_ssim.reset()
-        self.logger_instance.add_scalar('test/psnr', psnr, self.current_epoch)
-        self.logger_instance.add_scalar('test/ssim', ssim, self.current_epoch)
+        self.logger_instance.add_scalar('test/psnr', psnr, 1)
+        self.logger_instance.add_scalar('test/ssim', ssim, 1)
 
         log.info(f'Test: psnr={psnr:.4f}, ssim={ssim:.4f}')
 
@@ -375,8 +390,8 @@ class ObjectWatermark2(LightningModule):
             self.test_bars[aug_name].reset()
             self.test_ious[aug_name].reset()
 
-            self.logger_instance.add_scalar(f'test/bar_{aug_name}', bar, self.current_epoch)
-            self.logger_instance.add_scalar(f'test/iou_{aug_name}', iou, self.current_epoch)
+            self.logger_instance.add_scalar(f'test/bar_{aug_name}', bar, 1)
+            self.logger_instance.add_scalar(f'test/iou_{aug_name}', iou, 1)
             # Log to file
             log.info(f'{aug_name}: bar={bar:.4f}, iou={iou:.4f}')
 
@@ -385,6 +400,7 @@ class ObjectWatermark2(LightningModule):
             *self.encoder.parameters(),
             *self.decoder.parameters(),
         ], lr=1e-4, betas=(0.9, 0.999), weight_decay=1e-5)
+
         seg_sync_optim = torch.optim.Adam([
             *self.segmenter.parameters(),
             *self.syncor2.parameters(),
@@ -395,6 +411,10 @@ class ObjectWatermark2(LightningModule):
     @property
     def logger_instance(self):
         return self.logger.experiment
+
+    @property
+    def total_steps(self):
+        return self.trainer.fit_loop.total_batch_idx
 
     def visualize2logger(self, stage: str, image_dict: Dict, step: int):
         for label, image in image_dict.items():

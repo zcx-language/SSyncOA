@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from src.models.components.basic_block import Conv2D, Dense, DeformableConv2D
+from fastai.layers import PixelShuffle_ICNR
 from typing import Tuple, Optional
 
 
@@ -20,7 +21,8 @@ class StegaStampEncoder(nn.Module):
                  deformable_conv: bool = False,
                  multi_level_embed: bool = False,
                  mask_residual: bool = True,
-                 embed_factor: Optional[float] = 1.):     # set None for auto regressing a factor
+                 embed_factor: Optional[float] = 1.,
+                 pixel_shuffle_sample: bool = False):     # set None for auto regressing a factor
         super().__init__()
 
         if deformable_conv:
@@ -40,15 +42,43 @@ class StegaStampEncoder(nn.Module):
         self.conv3 = conv_blk(32+extra_channels, 64, 3, activation='relu', strides=2)
         self.conv4 = conv_blk(64+extra_channels, 128, 3, activation='relu', strides=2)
         self.conv5 = conv_blk(128+extra_channels, 256, 3, activation='relu', strides=2)
-        self.up6 = conv_blk(256+extra_channels, 128, 3, activation='relu')
+        # self.up6 = conv_blk(256+extra_channels, 128, 3, activation='relu')
+        # self.up6 = PixelShuffle_ICNR(256+extra_channels, 128, scale=2)
         self.conv6 = conv_blk(256+extra_channels, 128, 3, activation='relu')
-        self.up7 = conv_blk(128, 64, 3, activation='relu')
+        # self.up7 = conv_blk(128, 64, 3, activation='relu')
+        # self.up7 = PixelShuffle_ICNR(128, 64, scale=2)
         self.conv7 = conv_blk(128+extra_channels, 64, 3, activation='relu')
-        self.up8 = conv_blk(64, 32, 3, activation='relu')
+        # self.up8 = conv_blk(64, 32, 3, activation='relu')
+        # self.up8 = PixelShuffle_ICNR(64, 32, scale=2)
         self.conv8 = conv_blk(64+extra_channels, 32, 3, activation='relu')
-        self.up9 = conv_blk(32, 32, 3, activation='relu')
+        # self.up9 = conv_blk(32, 32, 3, activation='relu')
+        # self.up9 = PixelShuffle_ICNR(32, 32, scale=2)
         self.conv9 = conv_blk(32+4+32+extra_channels, 32, 3, activation='relu')
         self.residual = Conv2D(32, 3, 1, activation=None)
+
+        if pixel_shuffle_sample:
+            self.up6 = PixelShuffle_ICNR(256+extra_channels, 128, scale=2)
+            self.up7 = PixelShuffle_ICNR(128, 64, scale=2)
+            self.up8 = PixelShuffle_ICNR(64, 32, scale=2)
+            self.up9 = PixelShuffle_ICNR(32, 32, scale=2)
+        else:
+            self.up6 = nn.Sequential(
+                nn.UpsamplingNearest2d(scale_factor=2),
+                conv_blk(256+extra_channels, 128, 3, activation='relu')
+            )
+            self.up7 = nn.Sequential(
+                nn.UpsamplingNearest2d(scale_factor=2),
+                conv_blk(128, 64, 3, activation='relu')
+            )
+            self.up8 = nn.Sequential(
+                nn.UpsamplingNearest2d(scale_factor=2),
+                conv_blk(64, 32, 3, activation='relu')
+            )
+            self.up9 = nn.Sequential(
+                nn.UpsamplingNearest2d(scale_factor=2),
+                conv_blk(32, 32, 3, activation='relu')
+            )
+
 
         self.mask_residual = mask_residual
 
@@ -91,13 +121,13 @@ class StegaStampEncoder(nn.Module):
         if self.embed_factor == 0:
             self.embed_factor = self.embed_factor_head(conv5)
 
-        up6 = self.up6(F.interpolate(conv5, scale_factor=(2, 2), mode='nearest'))
+        up6 = self.up6(conv5)
         conv6 = self.conv6(torch.cat([conv4, up6], dim=1))
-        up7 = self.up7(F.interpolate(conv6, scale_factor=(2, 2), mode='nearest'))
+        up7 = self.up7(conv6)
         conv7 = self.conv7(torch.cat([conv3, up7], dim=1))
-        up8 = self.up8(F.interpolate(conv7, scale_factor=(2, 2), mode='nearest'))
+        up8 = self.up8(conv7)
         conv8 = self.conv8(torch.cat([conv2, up8], dim=1))
-        up9 = self.up9(F.interpolate(conv8, scale_factor=(2, 2), mode='nearest'))
+        up9 = self.up9(conv8)
         conv9 = self.conv9(torch.cat([conv1, up9, inputs], dim=1))
         residual = self.residual(conv9)
         return torch.tanh(residual)

@@ -7,6 +7,9 @@ defaults:
 
 model_checkpoint:
   dirpath: ${paths.output_dir}/checkpoints
-  filename: "epoch_{epoch:03d}"
+  monitor: "hp_metric"
+  mode: "max"
+  save_top_k: 3
+  filename: "step_{step}_{bar:.4f}_{psnr:.4f}"
   save_last: True
   auto_insert_metric_name: False
