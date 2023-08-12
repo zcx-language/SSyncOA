@@ -13,7 +13,7 @@ encoder:
   multi_level_embed: False
   mask_residual: True
   embed_factor: 1.  # Set to None for auto regression
-  pixel_shuffle_sample: True
+  pixel_shuffle_sample: False
   # _target_: src.models.encoder.UNetArch
   # msg_len: ${model.model_cfg.msg_len}
   # reduction: 16
@@ -75,7 +75,6 @@ augmenter:
 segmenter:
   _target_: src.models.segmenter.SMPUNet
 
-
 syncor:
   # _target_: src.models.syncor.SpatialTransNet
   # input_shape: [3, 256, 256]
@@ -87,9 +86,6 @@ syncor:
   _target_: src.models.syncor.CentralMoment
   output_size: [256, 256]
   # _target_: src.models.syncor.NoSync
-
-syncor2:
-  _target_: src.models.syncor.SMPUNet
 
 loss_fn:
   pix_loss:
@@ -103,4 +99,3 @@ loss_cfg:
   vis_delay_step: 1000
   msg_weight: 1000.
   seg_weight: 1.
-  sync_weight: 1.

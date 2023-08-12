@@ -79,7 +79,6 @@ class StegaStampEncoder(nn.Module):
                 conv_blk(32, 32, 3, activation='relu')
             )
 
-
         self.mask_residual = mask_residual
 
         if embed_factor:
@@ -130,7 +129,7 @@ class StegaStampEncoder(nn.Module):
         up9 = self.up9(conv8)
         conv9 = self.conv9(torch.cat([conv1, up9, inputs], dim=1))
         residual = self.residual(conv9)
-        return torch.tanh(residual)
+        return residual
 
     def forward(self, image, mask, secret, normalize: bool = False):
         residual = self._forward(image * mask, secret, normalize)
@@ -216,7 +215,7 @@ class StegaStampEncoderV1(nn.Module):
         merge9 = torch.cat([conv1, up9, inputs], dim=1)
         conv9 = self.conv9(merge9)
         residual = self.residual(conv9)
-        return torch.tanh(residual)
+        return residual
 
     def forward(self, image, mask, secret, normalize: bool = False):
         residual = self._forward(image * mask, secret, normalize)
@@ -301,7 +300,7 @@ class StegaStampEncoderV2(nn.Module):
         merge9 = torch.cat([conv1, up9, image], dim=1)
         conv9 = self.conv9(merge9)
         residual = self.residual(conv9)
-        return torch.tanh(residual)
+        return residual
 
     def forward(self, image, mask, secret, normalize: bool = False):
         residual = self._forward(image * mask, secret, normalize)

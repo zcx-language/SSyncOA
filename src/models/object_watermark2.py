@@ -42,7 +42,6 @@ class ObjectWatermark2(LightningModule):
                  augmenter: nn.Module,
                  segmenter: nn.Module,
                  syncor: nn.Module,
-                 syncor2: nn.Module,
                  decoder: nn.Module,
                  loss_fn: nn.ModuleDict,
                  loss_cfg: DictConfig):
@@ -59,7 +58,6 @@ class ObjectWatermark2(LightningModule):
         self.augmenter = augmenter
         self.segmenter = segmenter
         self.syncor = syncor
-        self.syncor2 = syncor2
         self.decoder = decoder
         self.loss_fn = loss_fn
         self.loss_cfg = loss_cfg
@@ -71,7 +69,6 @@ class ObjectWatermark2(LightningModule):
         self.train_ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
         self.train_bar = MultilabelAccuracy(num_labels=msg_len, threshold=0.5)
         self.train_iou = BinaryJaccardIndex(threshold=0.5)
-        self.train_iou2 = BinaryJaccardIndex(threshold=0.5)
         # self.train_par = MultilabelAccuracy(num_labels=512*512, threshold=0.5)
         # self.train_par = MultilabelAccuracy(num_labels=256*256, threshold=0.5)
 
@@ -79,7 +76,6 @@ class ObjectWatermark2(LightningModule):
         self.val_ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
         self.val_bar = MultilabelAccuracy(num_labels=msg_len, threshold=0.5)
         self.val_iou = BinaryJaccardIndex(threshold=0.5)
-        self.val_iou2 = BinaryJaccardIndex(threshold=0.5)
         # self.val_par = MultilabelAccuracy(num_labels=512*512, threshold=0.5)
         # self.val_par = MultilabelAccuracy(num_labels=256*256, threshold=0.5)
 
@@ -128,7 +124,6 @@ class ObjectWatermark2(LightningModule):
         self.val_ssim.reset()
         self.val_bar.reset()
         self.val_iou.reset()
-        self.val_iou2.reset()
 
         # Using global variable to avoid saving model in pickle
         global LPIPS_FN, DISCRIMINATOR
@@ -165,10 +160,9 @@ class ObjectWatermark2(LightningModule):
                         object_mask[idx] = seg_mask
 
             sync_object_patch, sync_mask_patch = self.syncor(_aug_container, object_mask)
-            sync_object_patch2, sync_mask_patch2 = self.syncor2(_aug_container, seg_mask_logits.sigmoid().detach())
             # Decode
             msg_hat_logit = self.decoder(sync_object_patch, sync_mask_patch, normalize=True)
-            return seg_mask_logits, sync_object_patch, sync_mask_patch, msg_hat_logit, sync_mask_patch2
+            return seg_mask_logits, sync_object_patch, sync_mask_patch, msg_hat_logit
 
         if phase == 'train' or phase == 'val':
             aug_dict = self.augmenter(container, mask, bg_img, self.total_steps)
@@ -180,7 +174,7 @@ class ObjectWatermark2(LightningModule):
             seg_mask_logits_dict, sync_object_patch_dict, sync_mask_patch_dict, msg_hat_logit_dict = {}, {}, {}, {}
             for aug_name, (aug_container, aug_mask) in aug_dict.items():
                 (seg_mask_logits_dict[aug_name], sync_object_patch_dict[aug_name],
-                 sync_mask_patch_dict[aug_name], msg_hat_logit_dict[aug_name], _) = seg_sync_decode(aug_container, aug_mask)
+                 sync_mask_patch_dict[aug_name], msg_hat_logit_dict[aug_name]) = seg_sync_decode(aug_container, aug_mask)
             return (host, mask, msg, container, residual, aug_dict, seg_mask_logits_dict,
                     sync_object_patch_dict, sync_mask_patch_dict, msg_hat_logit_dict)
         else:
@@ -189,7 +183,7 @@ class ObjectWatermark2(LightningModule):
     def training_step(self, batch: Any, batch_idx: int):
         # print(self.encoder.residual.conv.bias.grad)
         (host, mask, msg, container, residual, aug_container, aug_mask, seg_mask_logits,
-         sync_object_patch, sync_mask_patch, msg_hat_logit, sync_mask_patch2) = self.shared_step(batch, phase='train')
+         sync_object_patch, sync_mask_patch, msg_hat_logit) = self.shared_step(batch, phase='train')
 
         enc_dec_optim, seg_sync_optim = self.optimizers()
 
@@ -214,27 +208,22 @@ class ObjectWatermark2(LightningModule):
         # Segment loss
         # seg_loss = F.binary_cross_entropy_with_logits(seg_mask_logits, aug_mask.float()) * self.loss_cfg.seg_weight
         seg_loss = K.losses.lovasz_hinge_loss(seg_mask_logits, aug_mask[:, 0]) * self.loss_cfg.seg_weight
-        # Sync loss
-        sync_loss = K.losses.lovasz_hinge_loss(sync_mask_patch2, mask[:, 0]) * self.loss_cfg.sync_weight
         seg_sync_optim.zero_grad()
-        self.manual_backward(seg_loss + sync_loss)
+        self.manual_backward(seg_loss)
         seg_sync_optim.step()
 
         self.log('train/vis_loss', vis_loss)
         self.log('train/msg_loss', msg_loss)
         self.log('train/seg_loss', seg_loss)
-        self.log('train/sync_loss', sync_loss)
 
         # Calculate metrics
         with torch.no_grad():
             psnr = self.train_psnr(container, host)
             bar = self.train_bar(msg_hat_logit.sigmoid(), msg)
             iou = self.train_iou(seg_mask_logits.sigmoid(), aug_mask)
-            iou2 = self.train_iou2(sync_mask_patch2.sigmoid(), mask)
         self.log('train/psnr', psnr)
         self.log('train/bar', bar)
         self.log('train/iou', iou)
-        self.log('train/iou2', iou2)
 
         # Visualize
         image_size = self.model_cfg.image_shape[-2:]
@@ -245,14 +234,12 @@ class ObjectWatermark2(LightningModule):
                     F.interpolate(aug_container[:1], size=tuple(image_size)),
                     F.interpolate(aug_container[:1] * aug_mask[:1], size=tuple(image_size)),
                     sync_object_patch[:1] * sync_mask_patch[:1],
-                    sync_mask_patch2.sigmoid()[:1].repeat(1, 3, 1, 1)
                 ], dim=0),
                 bg2=torch.cat([
                     host[1:2] * mask[1:2], min_max_norm(residual[1:2]), container[1:2],
                     F.interpolate(aug_container[1:2], size=tuple(image_size)),
                     F.interpolate(aug_container[1:2] * aug_mask[1:2], size=tuple(image_size)),
                     sync_object_patch[1:2] * sync_mask_patch[1:2],
-                    sync_mask_patch2.sigmoid()[1:2].repeat(1, 3, 1, 1)
                 ], dim=0),
             )
             self.visualize2logger('train', show_image, self.total_steps)
@@ -270,7 +257,7 @@ class ObjectWatermark2(LightningModule):
 
     def validation_step(self, batch: Any, batch_idx: int):
         (host, mask, msg, container, residual, aug_container, aug_mask, seg_mask_logits,
-         sync_object_patch, sync_mask_patch, msg_hat_logit, sync_mask_patch2) = self.shared_step(batch, phase='val')
+         sync_object_patch, sync_mask_patch, msg_hat_logit) = self.shared_step(batch, phase='val')
         # import pdb; pdb.set_trace()
         # Update metrics
         with torch.no_grad():
@@ -278,7 +265,6 @@ class ObjectWatermark2(LightningModule):
             self.val_ssim.update(container, host)
             self.val_bar.update(msg_hat_logit.sigmoid(), msg)
             self.val_iou.update(seg_mask_logits.sigmoid(), aug_mask)
-            self.val_iou2.update(sync_mask_patch2.sigmoid(), mask)
 
         # Visualize
         image_size = self.model_cfg.image_shape[-2:]
@@ -290,7 +276,6 @@ class ObjectWatermark2(LightningModule):
                     F.interpolate(aug_container[:1], size=tuple(image_size)),
                     F.interpolate(aug_container[:1] * aug_mask[:1], size=tuple(image_size)),
                     sync_object_patch[:1] * sync_mask_patch[:1],
-                    sync_mask_patch2.sigmoid()[:1].repeat(1, 3, 1, 1)
                 ], dim=0),
             )
             self.visualize2logger('val/ob1', show_image, self.total_steps)
@@ -301,7 +286,6 @@ class ObjectWatermark2(LightningModule):
                     F.interpolate(aug_container[:1], size=tuple(image_size)),
                     F.interpolate(aug_container[:1] * aug_mask[:1], size=tuple(image_size)),
                     sync_object_patch[:1] * sync_mask_patch[:1],
-                    sync_mask_patch2.sigmoid()[:1].repeat(1, 3, 1, 1)
                 ], dim=0),
             )
             self.visualize2logger('val/ob2', show_image, self.total_steps)
@@ -311,19 +295,16 @@ class ObjectWatermark2(LightningModule):
         ssim = self.val_ssim.compute()
         bar = self.val_bar.compute()
         iou = self.val_iou.compute()
-        iou2 = self.val_iou2.compute()
 
         self.val_psnr.reset()
         self.val_ssim.reset()
         self.val_bar.reset()
         self.val_iou.reset()
-        self.val_iou2.reset()
 
         self.logger_instance.add_scalar('val/psnr', psnr, self.total_steps)
         self.logger_instance.add_scalar('val/ssim', ssim, self.total_steps)
         self.logger_instance.add_scalar('val/bar', bar, self.total_steps)
         self.logger_instance.add_scalar('val/iou', iou, self.total_steps)
-        self.logger_instance.add_scalar('val/iou2', iou2, self.total_steps)
 
         # Log for checkpoint callback
         self.log('hp_metric', bar+(psnr/50))
@@ -332,7 +313,7 @@ class ObjectWatermark2(LightningModule):
         self.log('bar', bar, logger=False)
 
         # Log to file
-        log.info(f'Step: {self.total_steps}: psnr={psnr:.4f}, ssim={ssim:.4f}, bar={bar:.4f}, iou={iou:.4f}, iou2={iou2:.4f}')
+        log.info(f'Step: {self.total_steps}: psnr={psnr:.4f}, ssim={ssim:.4f}, bar={bar:.4f}, iou={iou:.4f}')
         pass
 
     def on_test_start(self) -> None:
@@ -403,7 +384,6 @@ class ObjectWatermark2(LightningModule):
 
         seg_sync_optim = torch.optim.Adam([
             *self.segmenter.parameters(),
-            *self.syncor2.parameters(),
         ], lr=1e-4, betas=(0.9, 0.999), weight_decay=1e-5)
         return ({'optimizer': enc_dec_optim},
                 {'optimizer': seg_sync_optim})
