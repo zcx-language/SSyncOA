@@ -4,27 +4,98 @@ model_cfg:
   image_shape: ${datamodule.dataset_cfg.image_shape}
   msg_len: ${datamodule.dataset_cfg.msg_len}
   adopt_seg_delay_step: 10000
+  mask_object: True
+  lr: 0.0005
 
 encoder:
+  # _target_: src.models.encoder.DualAttentionEncoder
+  # image_shape: ${model.model_cfg.image_shape}
+  # secret_len: ${model.model_cfg.msg_len}
+  # conv_type: conv
+  # multi_level_embed: [True, False, False, False, False]
+  # embed_factor: 1.  # Set to None for auto regression
+  # pixel_shuffle_sample: False
+  # embed_mode: space
+  # self_attention: False
+
   _target_: src.models.encoder.StegaStampEncoder
   image_shape: ${model.model_cfg.image_shape}
   secret_len: ${model.model_cfg.msg_len}
-  deformable_conv: False
-  multi_level_embed: False
-  mask_residual: True
-  embed_factor: 1.  # Set to None for auto regression
-  pixel_shuffle_sample: False
+  out_channels: 3
+  conv_type: conv
+  multi_level_embed: [True, False, False, False, False]
+  embed_factor: 0  # Set to 0 for auto regression
+  embed_mode: space
+
   # _target_: src.models.encoder.UNetArch
   # msg_len: ${model.model_cfg.msg_len}
   # reduction: 16
   # deformable: False
 
+  # _target_: src.models.encoder.ARWGANEncoder
+  # image_shape: ${model.model_cfg.image_shape}
+  # message_len: ${model.model_cfg.msg_len}
+  # embed_factor: 1.
+
+  # _target_: src.models.encoder.AttentionStegaStampEncoder
+  # image_shape: ${model.model_cfg.image_shape}
+  # secret_len: ${model.model_cfg.msg_len}
+  # deformable_conv: False
+  # multi_level_embed: [True, False, False, False, False]
+  # attention_layer: [True, True, True, True, True, False, False, False, False, False]
+  # mask_residual: True
+  # embed_factor: 1.  # Set to None for auto regression
+  # pixel_shuffle_sample: False
+
+  # _target_: src.models.encoder.LXJEncoder
+  # opt:
+  #   network:
+  #     in_channels: 3
+  #     message_length: 64
+  #     encoder:
+  #       channels: 64
+  #       growth_rate: 64
+
+  # _target_: src.models.encoder.PIMoGEncoder
+  # in_channels: 3
+  # out_channels: 3
+  # msg_len: ${model.model_cfg.msg_len}
+
+  # _target_: src.models.encoder.PretrainedUNetEncoder
+  # ni: 6
+  # nf: 3
+  # msg_len: ${model.model_cfg.msg_len}
+
 decoder:
+  # _target_: src.models.decoder.DualAttentionDecoder
+  # image_shape: ${model.model_cfg.image_shape}
+  # secret_len: ${model.model_cfg.msg_len}
+  # conv_type: ${model.encoder.conv_type}
+  # self_attention: ${model.encoder.self_attention}
+
   _target_: src.models.decoder.StegaStampWoSTNDecoder
   image_shape: ${model.model_cfg.image_shape}
   secret_len: ${model.model_cfg.msg_len}
-  deformable_conv: ${model.encoder.deformable_conv}}
+  conv_type: ${model.encoder.conv_type}
+
   # _target_: src.models.decoder.HiDDeNDecoder
+  # msg_len: ${model.model_cfg.msg_len}
+
+  # _target_: src.models.decoder.ARWGANDecoder
+  # image_shape: ${model.model_cfg.image_shape}
+  # message_len: ${model.model_cfg.msg_len}
+
+  # _target_: src.models.decoder.LXJDecoder
+  # opt:
+  #   network:
+  #     in_channels: 3
+  #     message_length: 64
+  #     decoder:
+  #       channels: 64
+  #       growth_rate: 64
+
+  # _target_: src.models.decoder.PIMoGExtractor
+  # in_channels: 3
   # msg_len: ${model.model_cfg.msg_len}
 
 augmenter:
@@ -86,6 +157,8 @@ syncor:
   _target_: src.models.syncor.CentralMoment
   output_size: [256, 256]
   # _target_: src.models.syncor.NoSync
+  # _target_: src.models.syncor.CropOut
+  # output_size: [256, 256]
 
 loss_fn:
   pix_loss:
@@ -95,7 +168,11 @@ loss_fn:
     dist_type: l2
 
 loss_cfg:
+  vis_weight1: 1.2   # weight for pixel-level loss
+  vis_weight2: 1.1  # weight for LPIPS loss
+  vis_weight3: 0.   # weight for discriminator loss
   vis_weight: 1.
-  vis_delay_step: 1000
-  msg_weight: 1000.
+  vis_delay_step: 5000
+  msg_weight: 1.
   seg_weight: 1.
+  edge_weight: False

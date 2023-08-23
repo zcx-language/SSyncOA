@@ -3,9 +3,10 @@ dataset_cfg:
   data_dir: ${paths.data_dir}/DUTS
   image_shape: [3, 256, 256]
   msg_len: 30
-  repeat: 8   # real batch size, each batch for each object
+  # number of background images for each object, real batch size is the product of this and batch_size
+  num_backgrounds: 1
 
 dataloader_cfg:
-  batch_size: 1
+  batch_size: 12
   num_workers: 4
   pin_memory: False

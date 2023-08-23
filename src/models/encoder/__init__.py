@@ -11,8 +11,12 @@
 # Import lib here
 from .pimog_encoder import PIMoGEncoder
 from .hidden_encoder import HiDDeNEncoder
-from .stegastamp_encoder import StegaStampEncoder, StegaStampEncoderV2
+from .stegastamp_encoder import StegaStampEncoder, StegaStampEncoderV2, StegaStampEncoderV1, AttentionStegaStampEncoder
 from .unet_arch_encoder import UNetArchEncoder
+from .arwgan_encoder import ARWGANEncoder
+from .lxj_encoder import LXJEncoder
+from .pretrained_unet_encoder import PretrainedUNetEncoder
+from .dual_attention_encoder import DualAttentionEncoder
 
 
 def run():

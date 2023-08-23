@@ -30,14 +30,14 @@ class DUTSDataset(Dataset):
     def __init__(self, data_dir: str,
                  image_shape: Tuple[int, int, int] = (3, 256, 256),
                  msg_len: int = 32,
-                 repeat: int = 8,
+                 num_backgrounds: int = 1,
                  stage: str = 'train'):
         super().__init__()
         assert stage.lower() in ['train', 'val', 'test']
         data_dir = Path(data_dir)
         self.image_shape = image_shape
         self.msg_len = msg_len
-        self.repeat = repeat
+        self.num_backgrounds = num_backgrounds
 
         if stage.lower() == 'train':
             img_dir = data_dir / 'DUTS-TR' / 'Std-Image-30'
@@ -73,17 +73,17 @@ class DUTSDataset(Dataset):
             cv2.cvtColor(cv2.imread(str(img_path)), cv2.COLOR_BGR2RGB))
         mask = self.to_tensor(
             cv2.threshold(cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE), 127, 255, cv2.THRESH_BINARY)[1])
-        msg = torch.randint(0, 2, (self.repeat, self.msg_len))
+        msg = torch.randint(0, 2, (self.num_backgrounds, self.msg_len))
         bg_img = []
-        for _ in range(self.repeat):
+        for _ in range(self.num_backgrounds):
             bg_img_path = random.choice(self.bg_image_paths)
             bg_img.append(self.to_tensor(
                 cv2.resize(cv2.cvtColor(cv2.imread(str(bg_img_path)), cv2.COLOR_BGR2RGB), (512, 512))))
         bg_img = torch.stack(bg_img, dim=0)
         # img: (3, H, W)
         # mask: (1, H, W)
-        # mask: (self.repeat, len)
-        # gb_img: (self.repeat, 3, 512, 512)
+        # msg: (self.num_backgrounds, len)
+        # gb_img: (self.num_backgrounds, 3, 512, 512)
         return img, mask, msg, bg_img
 
 

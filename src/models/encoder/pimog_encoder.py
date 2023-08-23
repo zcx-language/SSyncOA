@@ -11,6 +11,7 @@
 # Import lib here
 import torch
 import torch.nn as nn
+import kornia as K
 import torch.nn.functional as F
 
 import pdb
@@ -65,76 +66,84 @@ class PIMoGEncoder(nn.Module):
         self.Conv7 = DoubleConv(64 * 3, 64)
 
         self.Up3 = up_conv(64, 32)
-        self.Conv8 = DoubleConv(32 * 2 + 64, 32)
+        self.Conv8 = DoubleConv(32 * 3 + 64, 32)
 
         self.Up2 = up_conv(32, 16)
-        self.Conv9 = DoubleConv(16 * 2 + 64, 16)
+        self.Conv9 = DoubleConv(16 * 3 + 64, 16)
+
+        self.Up1 = up_conv(16, 16)
 
         self.Conv_1x1 = nn.Conv2d(16, out_channels, kernel_size=1, stride=1, padding=0)
-        self.linear = nn.Linear(msg_len, 625)
+        self.linear = nn.Linear(msg_len, 256)
         self.Conv_message = DoubleConv(1, 64)
 
-    def forward(self, x, mask, msg, normalize: bool = False):
-        orig_x = x
-        x = x * mask
+    def _forward(self, x, msg, normalize: bool = False):
         if normalize:
             x = (x - 0.5) * 2.
             msg = (msg - 0.5) * 2.
 
-        x1 = self.Conv1(x)
+        x1 = self.Conv1(x)      # 256
 
         x2 = self.Maxpool(x1)
-        x2 = self.Conv2(x2)
+        x2 = self.Conv2(x2)     # 128
 
         x3 = self.Maxpool(x2)
-        x3 = self.Conv3(x3)
+        x3 = self.Conv3(x3)     # 64
 
         x4 = self.Maxpool(x3)
-        x4 = self.Conv4(x4)
+        x4 = self.Conv4(x4)     # 32
 
         x5 = self.Maxpool(x4)
-        x5 = self.Conv5(x5)
+        x5 = self.Conv5(x5)     # 16
         expanded_message = self.linear(msg)
-        expanded_message = expanded_message.view(-1, 1, 25, 25)
+        expanded_message = expanded_message.view(-1, 1, 16, 16)
         expanded_message = self.Conv_message(expanded_message)
         # print(x4.shape, x7.shape)
         x6 = torch.cat((x5, expanded_message), dim=1)
 
-        d4 = self.Up4(x6)
+        d4 = self.Up4(x6)       # 32
         expanded_message = self.linear(msg)
-        expanded_message = expanded_message.view(-1, 1, 25, 25)
+        expanded_message = expanded_message.view(-1, 1, 16, 16)
         expanded_message = torch.nn.functional.interpolate(expanded_message, size=(d4.shape[2], d4.shape[3]),
                                                            mode='bilinear')
         expanded_message = self.Conv_message(expanded_message)
         d4 = torch.cat((x4, d4, expanded_message), dim=1)
         d4 = self.Conv7(d4)
 
-        d3 = self.Up3(d4)
+        d3 = self.Up3(d4)   # 64
         expanded_message = self.linear(msg)
-        expanded_message = expanded_message.view(-1, 1, 25, 25)
+        expanded_message = expanded_message.view(-1, 1, 16, 16)
         expanded_message = torch.nn.functional.interpolate(expanded_message, size=(d3.shape[2], d3.shape[3]),
                                                            mode='bilinear')
         expanded_message = self.Conv_message(expanded_message)
         d3 = torch.cat((x3, d3, expanded_message), dim=1)
         d3 = self.Conv8(d3)
 
-        d2 = self.Up2(d3)
+        d2 = self.Up2(d3)   # 128
         expanded_message = self.linear(msg)
-        expanded_message = expanded_message.view(-1, 1, 25, 25)
+        expanded_message = expanded_message.view(-1, 1, 16, 16)
         expanded_message = torch.nn.functional.interpolate(expanded_message, size=(d2.shape[2], d2.shape[3]),
                                                            mode='bilinear')
         expanded_message = self.Conv_message(expanded_message)
         d2 = torch.cat((x2, d2, expanded_message), dim=1)
         d2 = self.Conv9(d2)
 
-        residual = self.Conv_1x1(d2)
-        return torch.clamp(orig_x + residual * mask, 0., 1.), residual * mask
+        d1 = self.Up1(d2)   # 256
+        residual = self.Conv_1x1(d1)
+        return residual
+
+    def forward(self, image, mask, secret, normalize: bool = False):
+        residual = self._forward(image * mask, secret, normalize)
+        # Ease edge effect
+        one_kernel = torch.ones(5, 5, device=mask.device)
+        container = (image + K.morphology.erosion(mask, one_kernel) * residual).clamp(0, 1)
+        return container, residual
 
 
 def run():
     from torchinfo import summary
     pimog_encoder = PIMoGEncoder(3, 3, 25)
-    summary(pimog_encoder, ((1, 3, 112, 112), (1, 25)))
+    summary(pimog_encoder, ((1, 3, 256, 256), (1, 1, 256, 256), (1, 30)))
     pass
 
 

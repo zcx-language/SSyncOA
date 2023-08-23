@@ -85,12 +85,15 @@ class ObjectWatermark2(LightningModule):
             key: MultilabelAccuracy(num_labels=msg_len, threshold=0.5) for key in self.augmenter.augment_types})
         self.test_ious = nn.ModuleDict({
             key: BinaryJaccardIndex(threshold=0.5) for key in self.augmenter.augment_types})
+        # For the combine distortion, which is random selected from these distortions
+        self.test_bars['Combine'] = MultilabelAccuracy(num_labels=msg_len, threshold=0.5)
+        self.test_ious['Combine'] = BinaryJaccardIndex(threshold=0.5)
         # self.test_par = MultilabelAccuracy(num_labels=256*256, threshold=0.5)
 
         # Log model arch to file
         from torchinfo import summary
         log.info(f'Encoder Summary:\n'
-                 f'{summary(self.encoder, input_size=((1, 3, 256, 256), (1, 1, 256, 256), (1, 30)), depth=5, verbose=0)}')
+                 f'{summary(self.encoder, input_size=((1, 3, 256, 256), (1, 1, 256, 256), (1, msg_len)), depth=5, verbose=0)}')
         log.info(f'Decoder Summary:\n'
                  f'{summary(self.decoder, input_size=((1, 3, 256, 256), (1, 1, 256, 256)), depth=5, verbose=0)}')
 
@@ -132,19 +135,25 @@ class ObjectWatermark2(LightningModule):
 
     def shared_step(self, batch: Any, phase: str = 'train'):
         host, mask, msg, bg_img = batch
-        # host: (1, 3, H, W)
-        # mask: (1, 1, H, W)
-        # msg: (1, real_batch_size, msg_len)
-        # bg_img: (1, real_batch_size, 3, 512, 512)
-        true_batch_size = msg.shape[1]
-        host = host.repeat(true_batch_size, 1, 1, 1)
-        mask = mask.repeat(true_batch_size, 1, 1, 1)
-        msg = msg.squeeze(dim=0)
-        bg_img = bg_img.squeeze(dim=0)
+        # host: (batch_size, 3, H, W)
+        # mask: (batch_size, 1, H, W)
+        # msg: (batch_size, num_backgrounds, msg_len)
+        # bg_img: (batch_size, num_backgrounds, 3, 512, 512)
+        num_backgrounds = bg_img.shape[1]
+        host = host.unsqueeze(dim=1).repeat(1, num_backgrounds, 1, 1, 1)
+        mask = mask.unsqueeze(dim=1).repeat(1, num_backgrounds, 1, 1, 1)
+
+        host = host.reshape(-1, *host.shape[2:])
+        mask = mask.reshape(-1, *mask.shape[2:])
+        msg = msg.reshape(-1, *msg.shape[2:])
+        bg_img = bg_img.reshape(-1, *bg_img.shape[2:])
+
+        # Embed object or the whole image
+        if not self.model_cfg.mask_object:
+            mask = torch.ones_like(mask)
 
         # Encode
         container, residual = self.encoder(host, mask, msg, normalize=True)
-        # Augment
 
         def seg_sync_decode(_aug_container, _aug_mask):
             # Segment
@@ -152,12 +161,21 @@ class ObjectWatermark2(LightningModule):
             seg_mask_logits = self.segmenter(_aug_container.detach(), normalize=True)
 
             # Sync
-            object_mask = _aug_mask.ge(0.5).int()
+            gt_masks = _aug_mask.ge(0.5).int()
+            pred_masks = seg_mask_logits.sigmoid().ge(0.5).int()
             if self.total_steps >= self.model_cfg.adopt_seg_delay_step:
-                for idx, seg_mask_logit in enumerate(seg_mask_logits):
-                    seg_mask = seg_mask_logit.sigmoid().ge(0.5).int()
-                    if seg_mask.sum() >= 1e4:   # Filter out abnormal seg mask
-                        object_mask[idx] = seg_mask
+                object_mask = []
+                for pred_mask, gt_mask in zip(pred_masks, gt_masks):
+                    intersection = (pred_mask & gt_mask).sum()
+                    union = (pred_mask | gt_mask).sum()
+                    iou = intersection.float() / union.float() if union > 0 else 0.
+                    if iou > 0.97:
+                        object_mask.append(pred_mask)
+                    else:
+                        object_mask.append(gt_mask)
+                object_mask = torch.stack(object_mask, dim=0)
+            else:
+                object_mask = gt_masks
 
             sync_object_patch, sync_mask_patch = self.syncor(_aug_container, object_mask)
             # Decode
@@ -174,7 +192,8 @@ class ObjectWatermark2(LightningModule):
             seg_mask_logits_dict, sync_object_patch_dict, sync_mask_patch_dict, msg_hat_logit_dict = {}, {}, {}, {}
             for aug_name, (aug_container, aug_mask) in aug_dict.items():
                 (seg_mask_logits_dict[aug_name], sync_object_patch_dict[aug_name],
-                 sync_mask_patch_dict[aug_name], msg_hat_logit_dict[aug_name]) = seg_sync_decode(aug_container, aug_mask)
+                 sync_mask_patch_dict[aug_name], msg_hat_logit_dict[aug_name]) = seg_sync_decode(aug_container,
+                                                                                                 aug_mask)
             return (host, mask, msg, container, residual, aug_dict, seg_mask_logits_dict,
                     sync_object_patch_dict, sync_mask_patch_dict, msg_hat_logit_dict)
         else:
@@ -184,25 +203,43 @@ class ObjectWatermark2(LightningModule):
         # print(self.encoder.residual.conv.bias.grad)
         (host, mask, msg, container, residual, aug_container, aug_mask, seg_mask_logits,
          sync_object_patch, sync_mask_patch, msg_hat_logit) = self.shared_step(batch, phase='train')
+        ob, wm_ob = host * mask, container * mask
+
+        # Calculate loss and optimize
+        # Optimize discriminator
+        if batch_idx % 3 == 0:
+            dis_loss = DISCRIMINATOR.optimize_parameters(wm_ob, ob)
+            self.log('train/dis_loss', dis_loss)
 
         enc_dec_optim, seg_sync_optim = self.optimizers()
 
-        if batch_idx % 3 == 0:
-            dis_loss = DISCRIMINATOR.optimize_parameters(container*mask, host*mask)
-            self.log('train/dis_loss', dis_loss)
-
-        # Calculate loss
-        # Encode loss
-        erosion_kernel = torch.ones(5, 5, device=self.device)   # erase the border effect
-        mask_weight = (1 - K.morphology.erosion(mask, erosion_kernel)) * 1e4 + torch.ones_like(mask)
-        vis_loss = (self.loss_fn.pix_loss(residual*mask_weight, torch.zeros_like(residual)) +
-                    LPIPS_FN(container, host, normalize=True).mean() +
-                    -DISCRIMINATOR(container*mask).mean())
-        vis_loss = vis_loss * self.loss_cfg.vis_weight if self.total_steps > self.loss_cfg.vis_delay_step else 0.
+        # erosion_kernel = torch.ones(5, 5, device=self.device)  # erase the border effect
+        # mask_weight = (1 - K.morphology.erosion(mask, erosion_kernel)) * 2 + torch.ones_like(mask)
+        # print(residual.min().item(), residual.max().item(), residual.mean().item())
+        # import matplotlib.pyplot as plt
+        # plt.subplot(131)
+        # plt.imshow(ob[0].permute(1, 2, 0).cpu().detach().numpy())
+        # plt.subplot(132)
+        # print(edge_weight[0].min(), edge_weight[0].max())
+        # plt.imshow(edge_weight[0, 0].cpu().detach().numpy(), cmap='gray')
+        # plt.subplot(133)
+        # plt.imshow(residual[0].permute(1, 2, 0).cpu().detach().numpy())
+        # plt.show()
+        # plt.close()
+        if self.loss_cfg.edge_weight:
+            edge_weight = 1.0 - K.filters.laplacian(K.color.rgb_to_grayscale(ob), kernel_size=5).clamp(0., 1.)
+        else:
+            edge_weight = torch.ones_like(residual)
+        vis_loss1 = self.loss_fn.pix_loss(residual * edge_weight, torch.zeros_like(residual)) * self.loss_cfg.vis_weight1
+        vis_loss2 = LPIPS_FN(wm_ob, ob, normalize=True).mean() * self.loss_cfg.vis_weight2
+        vis_loss3 = -DISCRIMINATOR(wm_ob).mean() * self.loss_cfg.vis_weight3
+        vis_loss = (vis_loss1 + vis_loss2 + vis_loss3) * self.loss_cfg.vis_weight if self.total_steps > self.loss_cfg.vis_delay_step else 0.
         # Decode loss
         msg_loss = F.binary_cross_entropy_with_logits(msg_hat_logit, msg.float()) * self.loss_cfg.msg_weight
         enc_dec_optim.zero_grad()
         self.manual_backward(vis_loss + msg_loss)
+        nn.utils.clip_grad_norm_([*self.encoder.parameters(),
+                                  *self.decoder.parameters()], max_norm=100)
         enc_dec_optim.step()
 
         # Segment loss
@@ -210,15 +247,19 @@ class ObjectWatermark2(LightningModule):
         seg_loss = K.losses.lovasz_hinge_loss(seg_mask_logits, aug_mask[:, 0]) * self.loss_cfg.seg_weight
         seg_sync_optim.zero_grad()
         self.manual_backward(seg_loss)
+        nn.utils.clip_grad_norm_([*self.segmenter.parameters()], max_norm=100)
         seg_sync_optim.step()
 
+        self.log('train/vis_loss1', vis_loss1)
+        self.log('train/vis_loss2', vis_loss2)
+        self.log('train/vis_loss3', vis_loss3)
         self.log('train/vis_loss', vis_loss)
         self.log('train/msg_loss', msg_loss)
         self.log('train/seg_loss', seg_loss)
 
         # Calculate metrics
         with torch.no_grad():
-            psnr = self.train_psnr(container, host)
+            psnr = self.train_psnr(wm_ob, ob)
             bar = self.train_bar(msg_hat_logit.sigmoid(), msg)
             iou = self.train_iou(seg_mask_logits.sigmoid(), aug_mask)
         self.log('train/psnr', psnr)
@@ -229,14 +270,18 @@ class ObjectWatermark2(LightningModule):
         image_size = self.model_cfg.image_shape[-2:]
         if self.total_steps % 300 == 0:
             show_image = dict(
-                bg1=torch.cat([
-                    host[:1] * mask[:1], min_max_norm(residual[:1]), container[:1],
+                ob1=torch.cat([
+                    host[:1] * mask[:1],
+                    min_max_norm(residual[:1] if residual.shape[1] == 3 else residual[:1].repeat(1, 3, 1, 1)),
+                    container[:1],
                     F.interpolate(aug_container[:1], size=tuple(image_size)),
                     F.interpolate(aug_container[:1] * aug_mask[:1], size=tuple(image_size)),
                     sync_object_patch[:1] * sync_mask_patch[:1],
                 ], dim=0),
-                bg2=torch.cat([
-                    host[1:2] * mask[1:2], min_max_norm(residual[1:2]), container[1:2],
+                ob2=torch.cat([
+                    host[1:2] * mask[1:2],
+                    residual[1:2].clamp(0, 1) if residual.shape[1] == 3 else residual[1:2].repeat(1, 3, 1, 1).clamp(0, 1),
+                    container[1:2],
                     F.interpolate(aug_container[1:2], size=tuple(image_size)),
                     F.interpolate(aug_container[1:2] * aug_mask[1:2], size=tuple(image_size)),
                     sync_object_patch[1:2] * sync_mask_patch[1:2],
@@ -258,11 +303,12 @@ class ObjectWatermark2(LightningModule):
     def validation_step(self, batch: Any, batch_idx: int):
         (host, mask, msg, container, residual, aug_container, aug_mask, seg_mask_logits,
          sync_object_patch, sync_mask_patch, msg_hat_logit) = self.shared_step(batch, phase='val')
-        # import pdb; pdb.set_trace()
+        ob, wm_ob = host * mask, container * mask
+
         # Update metrics
         with torch.no_grad():
-            self.val_psnr.update(container, host)
-            self.val_ssim.update(container, host)
+            self.val_psnr.update(wm_ob, ob)
+            self.val_ssim.update(wm_ob, ob)
             self.val_bar.update(msg_hat_logit.sigmoid(), msg)
             self.val_iou.update(seg_mask_logits.sigmoid(), aug_mask)
 
@@ -271,24 +317,24 @@ class ObjectWatermark2(LightningModule):
         if batch_idx == 0:
             # import pdb; pdb.set_trace()
             show_image = dict(
-                bg1=torch.cat([
-                    host[:1] * mask[:1], min_max_norm(residual[:1]), container[:1],
+                ob1=torch.cat([
+                    host[:1] * mask[:1],
+                    min_max_norm(residual[:1] if residual.shape[1] == 3 else residual[:1].repeat(1, 3, 1, 1)),
+                    container[:1],
                     F.interpolate(aug_container[:1], size=tuple(image_size)),
                     F.interpolate(aug_container[:1] * aug_mask[:1], size=tuple(image_size)),
                     sync_object_patch[:1] * sync_mask_patch[:1],
                 ], dim=0),
+                ob2=torch.cat([
+                    host[1:2] * mask[1:2],
+                    residual[1:2].clamp(0, 1) if residual.shape[1] == 3 else residual[1:2].repeat(1, 3, 1, 1).clamp(0, 1),
+                    container[1:2],
+                    F.interpolate(aug_container[1:2], size=tuple(image_size)),
+                    F.interpolate(aug_container[1:2] * aug_mask[1:2], size=tuple(image_size)),
+                    sync_object_patch[1:2] * sync_mask_patch[1:2],
+                ], dim=0)
             )
-            self.visualize2logger('val/ob1', show_image, self.total_steps)
-        if batch_idx == 1:
-            show_image = dict(
-                bg1=torch.cat([
-                    host[:1] * mask[:1], min_max_norm(residual[:1]), container[:1],
-                    F.interpolate(aug_container[:1], size=tuple(image_size)),
-                    F.interpolate(aug_container[:1] * aug_mask[:1], size=tuple(image_size)),
-                    sync_object_patch[:1] * sync_mask_patch[:1],
-                ], dim=0),
-            )
-            self.visualize2logger('val/ob2', show_image, self.total_steps)
+            self.visualize2logger('val', show_image, self.total_steps)
 
     def on_validation_epoch_end(self) -> None:
         psnr = self.val_psnr.compute()
@@ -307,7 +353,7 @@ class ObjectWatermark2(LightningModule):
         self.logger_instance.add_scalar('val/iou', iou, self.total_steps)
 
         # Log for checkpoint callback
-        self.log('hp_metric', bar+(psnr/50))
+        self.log('hp_metric', bar + (psnr / 50))
         self.log('step', self.total_steps, logger=False)
         self.log('psnr', psnr, logger=False)
         self.log('bar', bar, logger=False)
@@ -322,11 +368,13 @@ class ObjectWatermark2(LightningModule):
     def test_step(self, batch: Any, batch_idx: int):
         (host, mask, msg, container, residual, aug_dict, seg_mask_logits_dict,
          sync_object_patch_dict, sync_mask_patch_dict, msg_hat_logit_dict) = self.shared_step(batch, phase='test')
+        ob, wm_ob = host * mask, container * mask
 
         with torch.no_grad():
-            self.test_psnr.update(container, host)
-            self.test_ssim.update(container, host)
+            self.test_psnr.update(wm_ob, ob)
+            self.test_ssim.update(wm_ob, ob)
 
+        rnd_aug_name = random.choice(self.augmenter.augment_types)
         for aug_name in self.augmenter.augment_types:
             aug_container, aug_mask = aug_dict[aug_name]
             seg_mask_logits = seg_mask_logits_dict[aug_name]
@@ -337,21 +385,27 @@ class ObjectWatermark2(LightningModule):
                 self.test_bars[aug_name].update(msg_hat_logit.sigmoid(), msg)
                 self.test_ious[aug_name].update(seg_mask_logits.sigmoid(), aug_mask)
 
+                # Combine distortion
+                if aug_name == rnd_aug_name:
+                    self.test_bars['Combine'].update(msg_hat_logit.sigmoid(), msg)
+                    self.test_ious['Combine'].update(seg_mask_logits.sigmoid(), aug_mask)
+
         # Visualize
-        rnd_aug_name = random.choice(self.augmenter.augment_types)
         aug_container, aug_mask = aug_dict[rnd_aug_name]
         sync_object_patch = sync_object_patch_dict[rnd_aug_name]
         sync_mask_patch = sync_mask_patch_dict[rnd_aug_name]
 
         image_size = self.model_cfg.image_shape[-2:]
-        if batch_idx % 100 == 0:
+        if batch_idx % 30 == 0:
             show_image = dict(
-                bg1=torch.cat([
-                    host[:1] * mask[:1], min_max_norm(residual[:1]), container[:1],
+                ob1=torch.cat([
+                    host[:1] * mask[:1],
+                    min_max_norm(residual[:1] if residual.shape[1] == 3 else residual[:1].repeat(1, 3, 1, 1)),
+                    container[:1],
                     F.interpolate(aug_container[:1], size=tuple(image_size)),
                     F.interpolate(aug_container[:1] * aug_mask[:1], size=tuple(image_size)),
                     sync_object_patch[:1] * sync_mask_patch[:1]
-                ], dim=0),
+                ], dim=0)
             )
             self.visualize2logger('test', show_image, batch_idx)
 
@@ -360,19 +414,19 @@ class ObjectWatermark2(LightningModule):
         ssim = self.test_ssim.compute()
         self.test_psnr.reset()
         self.test_ssim.reset()
-        self.logger_instance.add_scalar('test/psnr', psnr, 1)
-        self.logger_instance.add_scalar('test/ssim', ssim, 1)
+        self.logger_instance.add_scalar('test/psnr', psnr, self.total_steps)
+        self.logger_instance.add_scalar('test/ssim', ssim, self.total_steps)
 
         log.info(f'Test: psnr={psnr:.4f}, ssim={ssim:.4f}')
 
-        for aug_name in self.augmenter.augment_types:
+        for aug_name in ['Combine'] + list(self.augmenter.augment_types):
             bar = self.test_bars[aug_name].compute()
             iou = self.test_ious[aug_name].compute()
             self.test_bars[aug_name].reset()
             self.test_ious[aug_name].reset()
 
-            self.logger_instance.add_scalar(f'test/bar_{aug_name}', bar, 1)
-            self.logger_instance.add_scalar(f'test/iou_{aug_name}', iou, 1)
+            self.logger_instance.add_scalar(f'test/bar_{aug_name}', bar, self.total_steps)
+            self.logger_instance.add_scalar(f'test/iou_{aug_name}', iou, self.total_steps)
             # Log to file
             log.info(f'{aug_name}: bar={bar:.4f}, iou={iou:.4f}')
 
@@ -380,11 +434,11 @@ class ObjectWatermark2(LightningModule):
         enc_dec_optim = torch.optim.Adam([
             *self.encoder.parameters(),
             *self.decoder.parameters(),
-        ], lr=1e-4, betas=(0.9, 0.999), weight_decay=1e-5)
+        ], lr=self.model_cfg.lr, betas=(0.9, 0.999), weight_decay=1e-5)
 
         seg_sync_optim = torch.optim.Adam([
             *self.segmenter.parameters(),
-        ], lr=1e-4, betas=(0.9, 0.999), weight_decay=1e-5)
+        ], lr=self.model_cfg.lr, betas=(0.9, 0.999), weight_decay=1e-5)
         return ({'optimizer': enc_dec_optim},
                 {'optimizer': seg_sync_optim})
 

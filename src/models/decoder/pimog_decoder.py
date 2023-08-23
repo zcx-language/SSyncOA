@@ -52,15 +52,15 @@ class ResidualBlock(nn.Module):
         return out
 
 
-class Extractor(nn.Module):
+class PIMoGExtractor(nn.Module):
     def __init__(self, in_channels: int = 64, msg_len: int = 20):
-        super(Extractor, self).__init__()
+        super(PIMoGExtractor, self).__init__()
         self.layer1 = SingleConv(in_channels, 64, 1)
         self.layer2 = nn.Sequential(ResidualBlock(64, 64, 1), ResidualBlock(64, 64, 2))
         self.layer3 = nn.Sequential(ResidualBlock(64, 64, 1), ResidualBlock(64, 64, 2))
         self.layer4 = nn.Sequential(ResidualBlock(64, 64, 1), ResidualBlock(64, 64, 2))
         self.layer5 = nn.Conv2d(64, 1, kernel_size=1, stride=1, padding=0, bias=False)
-        self.linear = nn.Linear(196, msg_len)
+        self.linear = nn.Linear(1024, msg_len)
 
     def forward(self, x, mask, normalize: bool = False):
         x = x * mask
@@ -71,7 +71,7 @@ class Extractor(nn.Module):
         out = self.layer3(out)
         out = self.layer4(out)
         out = self.layer5(out)
-        out = out.view(-1, 196)
+        out = out.view(-1, 1024)
         out = self.linear(out)
         return out
 
@@ -79,7 +79,7 @@ class Extractor(nn.Module):
 class PIMoGDecoder(nn.Module):
     def __init__(self, msg_len: int = 20):
         super().__init__()
-        self.extractor = Extractor(in_channels=64, msg_len=msg_len)
+        self.extractor = PIMoGExtractor(in_channels=64, msg_len=msg_len)
         self.layer1 = nn.Sequential(
             SingleConv(3, 64, 1),
             SingleConv(64, 64, 1),
@@ -89,9 +89,12 @@ class PIMoGDecoder(nn.Module):
             ResidualBlock(64, 64, 1),
         )
 
-    def forward(self, x):
+    def forward(self, x, mask, normalize: bool = False):
+        x = x * mask
+        if normalize:
+            x = (x - 0.5) * 2.
         x1 = self.layer1(x)
-        msg_logit = self.extractor(x1)
+        msg_logit = self.extractor(x1, mask)
         return msg_logit
 
 

@@ -11,7 +11,88 @@
 # Import lib here
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from mmcv.ops import DeformConv2dPack
+from fastai.layers import ConvLayer, SeparableBlock, ResBlock, SEModule, PixelShuffle_ICNR, SelfAttention
+from functools import partial
+
+
+ConvBNReLU = ConvLayer
+ResConvBNReLU = partial(ResBlock, expansion=1, reduction=8)
+
+
+class SEConvBNReLU(nn.Module):
+    def __init__(self, ni: int,
+                 nf: int,
+                 ks: int = 3,
+                 stride: int = 1,
+                 reduction: int = 8,
+                 **kwargs):
+        super().__init__()
+        self.conv = ConvLayer(ni, nf, ks, stride, **kwargs)
+        self.se = SEModule(nf, reduction)
+
+    def forward(self, x: torch.Tensor):
+        conv_x = self.conv(x)
+        return conv_x + self.se(conv_x)
+
+
+class SAConvBNReLU(nn.Module):
+    def __init__(self, ni: int,
+                 nf: int,
+                 ks: int = 3,
+                 stride: int = 1,
+                 **kwargs):
+        super().__init__()
+        self.conv = ConvLayer(ni, nf, ks, stride, **kwargs)
+        self.sa = SelfAttention(nf)
+
+    def forward(self, x: torch.Tensor):
+        conv_x = self.conv(x)
+        while conv_x.shape[3] > 32:
+            conv_x = F.interpolate(conv_x, scale_factor=0.5, mode='bilinear')
+        sa_conv = self.sa(conv_x)
+        return conv_x + F.interpolate(sa_conv, conv_x.shape[-2:], mode='bilinear')
+
+
+class DAConvBNReLU(nn.Module):
+    def __init__(self, ni: int,
+                 nf: int,
+                 ks: int = 3,
+                 stride: int = 1,
+                 reduction: int = 8,
+                 **kwargs):
+        super().__init__()
+        self.conv = ConvLayer(ni, nf, ks, stride, **kwargs)
+        self.se = SEModule(nf, reduction)
+        self.sa = SelfAttention(nf)
+
+    def forward(self, x: torch.Tensor):
+        conv_x = self.conv(x)
+        se_conv = self.se(conv_x)
+
+        down_conv_x = conv_x
+        while down_conv_x.shape[3] > 32:
+            down_conv_x = F.interpolate(down_conv_x, scale_factor=0.5, mode='bilinear')
+        sa_conv = self.sa(down_conv_x)
+        return conv_x + se_conv + F.interpolate(sa_conv, conv_x.shape[-2:], mode='bilinear')
+
+
+class DeformableConvBNReLU(nn.Module):
+    def __init__(self, ni: int,
+                 nf: int,
+                 ks: int = 3,
+                 stride: int = 1, **kwargs):
+        super().__init__()
+        self.deformable_conv = DeformConv2dPack(ni, nf, ks, stride, int((ks - 1) / 2))
+        self.batch_norm = nn.BatchNorm2d(nf)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor):
+        return self.relu(self.batch_norm(self.deformable_conv(x)))
+
+
+DWConvBNReLU = partial(SeparableBlock, expansion=1, reduction=8)
 
 
 class Dense(nn.Module):
@@ -98,6 +179,11 @@ class Flatten(nn.Module):
 
 
 def run():
+    from torchinfo import summary
+    sebnrelu = SEConvBNReLU(3, 64)
+    summary(sebnrelu, (1, 3, 256, 256))
+    sabnrelu = SAConvBNReLU(3, 64)
+    summary(sabnrelu, (1, 3, 256, 256))
     pass
 
 

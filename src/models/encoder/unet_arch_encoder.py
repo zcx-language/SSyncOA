@@ -12,6 +12,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import kornia as K
 from fastai.layers import ConvLayer, ResBlock, SEModule
 from mmcv.ops import DeformConv2dPack, DeformRoIPoolPack
 
@@ -124,14 +125,14 @@ class UNetArchEncoder(nn.Module):
                  network_depth: int = 4,
                  num_bridge: int = 1,
                  reduction: int = 16,
-                 deformable: bool = False,
-                 mask_residual: bool = False,
-                 ckpt_path: str = None):
+                 deformable_conv: bool = False,
+                 ckpt_path: str = None,
+                 embed_factor: Optional[float] = 1.):
         super(UNetArchEncoder, self).__init__()
 
         self.network_depth = network_depth
         self.num_bridge = num_bridge
-        self.mask_residual = mask_residual
+        self.embed_factor = embed_factor
 
         self.first_conv = nn.Conv2d(in_channels=in_channels,
                                     out_channels=init_features, kernel_size=3,
@@ -142,7 +143,7 @@ class UNetArchEncoder(nn.Module):
         self.msg_linear_layers = nn.ModuleList([])
         features = init_features
         for i in range(self.network_depth):
-            self.down_layers.append(UNetEncoder(features+features, 2 * features, reduction=reduction, deformable=deformable))
+            self.down_layers.append(UNetEncoder(features+features, 2 * features, reduction=reduction, deformable=deformable_conv))
             self.msg_linear_layers.append(nn.Sequential(nn.Linear(msg_len, features), nn.BatchNorm1d(features), nn.ReLU(inplace=True)))
             skip_connection_channels.insert(0, 2 * features)
             features *= 2
@@ -150,7 +151,7 @@ class UNetArchEncoder(nn.Module):
         self.bridge_layers = nn.ModuleList([])
         last_channels = skip_connection_channels[0]
         for i in range(self.num_bridge):
-            self.bridge_layers.append(Bridge(last_channels, last_channels, reduction=reduction, deformable=deformable))
+            self.bridge_layers.append(Bridge(last_channels, last_channels, reduction=reduction, deformable=deformable_conv))
 
         self.up_layers = nn.ModuleList([])
         prev_channels = last_channels
@@ -158,7 +159,7 @@ class UNetArchEncoder(nn.Module):
             self.up_layers.append(UNetDecoder(prev_channels + skip_connection_channels[i],
                                               skip_connection_channels[i],
                                               reduction=reduction,
-                                              deformable=deformable))
+                                              deformable=deformable_conv))
             prev_channels = skip_connection_channels[i]
 
         self.final = nn.Conv2d(2 * init_features, out_channels, 1)
@@ -192,17 +193,17 @@ class UNetArchEncoder(nn.Module):
         return out
 
     def forward(self, image, mask, secret, normalize: bool = False):
-        residual = self._forward(image * mask, secret, normalize)
-        if self.mask_residual:
-            return (image + mask * residual).clamp(0, 1), mask * residual
-        else:
-            return (image + residual).clamp(0, 1), residual
+        residual = self._forward(image * mask, secret, normalize) * self.embed_factor
+        # Ease edge effect
+        one_kernel = torch.ones(5, 5, device=mask.device)
+        container = (image + K.morphology.erosion(mask, one_kernel) * residual).clamp(0, 1)
+        return container, residual
 
 
 def run():
     from torchinfo import summary
     model = UNetArchEncoder()
-    summary(model, input_size=((16, 3, 256, 256), (16, 30)))
+    summary(model, input_size=((1, 3, 256, 256), (1, 1, 256, 256), (1, 30)))
     pass
 
 

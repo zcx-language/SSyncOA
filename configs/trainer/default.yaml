@@ -2,8 +2,11 @@ _target_: lightning.pytorch.trainer.Trainer
 
 default_root_dir: ${paths.output_dir}
 
-min_epochs: 1 # prevents early stopping
-max_epochs: 100
+# min_epochs: 1 # prevents early stopping
+# max_epochs: 100
+min_steps: 10
+max_steps: 300000
+
 
 accelerator: cpu
 devices: 1
@@ -14,7 +17,7 @@ devices: 1
 # gradient_clip_val: 1000.
 
 # how often to check the validation set, validating after N batches
-val_check_interval: 3000
+val_check_interval: 2000
 
 # perform a validation loop every N training epochs
 check_val_every_n_epoch: null

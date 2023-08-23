@@ -15,6 +15,7 @@ from .bbox_stn import BBoxSTN
 from .central_moment import CentralMoment
 from .no_sync import NoSync
 from .smp_unet import SMPUNet
+from .crop_out import CropOut
 
 
 def run():
