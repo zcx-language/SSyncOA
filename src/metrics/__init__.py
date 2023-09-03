@@ -9,6 +9,7 @@
 # @CreateTime   : 2023/5/16 20:24
 
 # Import lib here
+from .accumulation import Accumulation
 
 
 def run():

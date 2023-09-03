@@ -4,7 +4,14 @@ model_cfg:
   image_shape: ${datamodule.dataset_cfg.image_shape}
   msg_len: ${datamodule.dataset_cfg.msg_len}
   adopt_seg_delay_step: 10000
-  mask_object: True
+  preprocess_bbox_crop_out: False
+  # Please use `datamodule.dataset_cfg.random_translate`
+  # preprocess_random_translate: ???
+  preprocess_random_scale: False
+  preprocess_random_rotate: False
+  mask_object_on_train: True
+  iou_thresh_for_segment_pred: 0.97
+  iou_thresh_for_correct_ratio: 0.97
   lr: 0.0005
 
 encoder:
@@ -24,8 +31,19 @@ encoder:
   out_channels: 3
   conv_type: conv
   multi_level_embed: [True, False, False, False, False]
-  embed_factor: 0  # Set to 0 for auto regression
-  embed_mode: space
+  embed_factor: 1.0  # Set to 0 for auto regression
+  # embed_mode: Union[space_resize, space_repeat, channel, bbox]
+  embed_mode: space_resize
+  # mask_mode: Union[null, mask, forward_mask, concat]
+  # Set `null` to do nothing
+  # Set `mask` to mask the image
+  # Set `forward_mask` to avoid mask gradient in the backward pass
+  # Set `concat` to concatenate mask and image, please use once
+  mask_object: mask
+  mask_msg: null
+  mask_residual: False    # Attention! it binds with `lpips_mask` in `loss_cfg`
+  begin_ca: True
+  mid_sa: True
 
   # _target_: src.models.encoder.UNetArch
   # msg_len: ${model.model_cfg.msg_len}
@@ -77,6 +95,9 @@ decoder:
   image_shape: ${model.model_cfg.image_shape}
   secret_len: ${model.model_cfg.msg_len}
   conv_type: ${model.encoder.conv_type}
+  # mask_object: Union[null, mask, concat, batch_norm_mask]
+  mask_object : mask
+  arch_version: v0
 
   # _target_: src.models.decoder.HiDDeNDecoder
   # msg_len: ${model.model_cfg.msg_len}
@@ -102,18 +123,21 @@ augmenter:
   # _target_: src.models.augmenter.Augmenter
   # _target_: src.models.augmenter.GeometricCopypasteNoise
   _target_: src.models.augmenter.RandomSelectAugmenter
+  device: cuda
 
   aug_dict:
-    Translate:
-      # Have done in copy-paste process
-      _target_: torch.nn.Identity
+    # No need identity, as low noise or blur is enough
+    # Translate:
+    #   # Have done in copy-paste process
+    #   _target_: torch.nn.Identity
     Affine:
       _target_: kornia.augmentation.RandomAffine
       degrees: 45
       # translate: [0.2, 0.2]
       scale: [0.75, 1.5]
       # shear: 10.
-      same_on_batch: false
+      same_on_batch: False
+      p: 1.
 
     # MotionBlur:
     #   _target_: kornia.augmentation.RandomMotionBlur
@@ -136,12 +160,19 @@ augmenter:
       _target_: kornia.augmentation.RandomGaussianNoise
       mean: 0.
       std: 0.05
-    JPEG:
+    JPEG50:
       _target_: src.models.augmenter.DiffJPEG.DiffJPEG.DiffJPEG
       height: 512
       width: 512
       differentiable: True
       quality: 50
+    JPEG75:
+      _target_: src.models.augmenter.DiffJPEG.DiffJPEG.DiffJPEG
+      height: 512
+      width: 512
+      differentiable: True
+      quality: 75
+
 
 segmenter:
   _target_: src.models.segmenter.SMPUNet
@@ -156,6 +187,10 @@ syncor:
   # output_size: [256, 256]
   _target_: src.models.syncor.CentralMoment
   output_size: [256, 256]
+  random_translate: False
+  random_scale: False
+  random_rotate: False
+  bbox_crop_out: False
   # _target_: src.models.syncor.NoSync
   # _target_: src.models.syncor.CropOut
   # output_size: [256, 256]
@@ -168,11 +203,12 @@ loss_fn:
     dist_type: l2
 
 loss_cfg:
-  vis_weight1: 1.2   # weight for pixel-level loss
-  vis_weight2: 1.1  # weight for LPIPS loss
+  vis_weight1: 1.5   # weight for pixel-level loss
+  vis_weight2: 1.2  # weight for LPIPS loss
+  lpips_mask: False
   vis_weight3: 0.   # weight for discriminator loss
   vis_weight: 1.
   vis_delay_step: 5000
-  msg_weight: 1.
+  msg_weight: 2.
   seg_weight: 1.
-  edge_weight: False
+  accu_mask_weight: False

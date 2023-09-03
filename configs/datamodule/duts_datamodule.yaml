@@ -5,6 +5,8 @@ dataset_cfg:
   msg_len: 30
   # number of background images for each object, real batch size is the product of this and batch_size
   num_backgrounds: 1
+  random_translate: False
+  add_all_one_masks: False
 
 dataloader_cfg:
   batch_size: 12

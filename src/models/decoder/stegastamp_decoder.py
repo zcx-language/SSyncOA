@@ -11,11 +11,28 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from src.models.components.basic_block import (Conv2D, Dense, Flatten, DeformableConv2D,
+from src.models.components.basic_block import (Conv2D, Dense, Flatten, DeformableConv2D, SAConvBNReLU,
                                                ConvBNReLU, DWConvBNReLU, DeformableConvBNReLU, SEConvBNReLU)
 from src.models.syncor.spatial_transformer_network import SpatialTransNet
 from src.models.syncor.perspective_transform_layer import PerspectiveTransformLayer
-from typing import Tuple
+from typing import Tuple, Any, Optional, Union
+
+
+class BatchNormalizeMaskLayer(torch.autograd.Function):
+    # The average of gradient value can not normalize(smooth) the modification in residual
+    @staticmethod
+    def forward(ctx: Any, inputs: torch.Tensor, mask: torch.Tensor) -> Any:
+        ctx.save_for_backward(mask)
+        return inputs * mask
+
+    @staticmethod
+    def backward(ctx: Any, grad_outputs: Any) -> Any:
+        mask = ctx.saved_tensors[0]
+        grad_inputs = grad_outputs * mask
+        ones_mask = torch.ones_like(mask)   # Add for avoid the zero division
+        grad_inputs = grad_inputs / ((mask.sum(dim=0, keepdim=True) + ones_mask) / mask.shape[0])
+        print(grad_inputs.min(), grad_inputs.max())
+        return grad_inputs, None
 
 
 class StegaStampDecoder(nn.Module):
@@ -49,7 +66,11 @@ class StegaStampDecoder(nn.Module):
 
 
 class StegaStampWoSTNDecoder(nn.Module):
-    def __init__(self, image_shape: Tuple[int, int, int], secret_len: int = 100, conv_type: str = 'conv'):
+    def __init__(self, image_shape: Tuple[int, int, int],
+                 secret_len: int = 100,
+                 conv_type: str = 'conv',
+                 mask_object: Optional[str] = None,
+                 arch_version: str = 'v0'):
         super().__init__()
         in_channels, height, width = image_shape
         self.secret_len = secret_len
@@ -66,24 +87,74 @@ class StegaStampWoSTNDecoder(nn.Module):
         else:
             raise NotImplementedError
 
-        self.decoder = nn.Sequential(
-            conv_blk(ni=3, nf=32, ks=3, stride=2),
-            conv_blk(ni=32, nf=32, ks=3),
-            conv_blk(ni=32, nf=64, ks=3, stride=2),
-            conv_blk(ni=64, nf=64, ks=3),
-            conv_blk(ni=64, nf=64, ks=3, stride=2),
-            conv_blk(ni=64, nf=128, ks=3, stride=2),
-            conv_blk(ni=128, nf=128, ks=3, stride=2),
-            Flatten(),
-            nn.Linear(flatten_dims, 512),
-            nn.ReLU(inplace=True),
-            nn.Linear(512, secret_len),
-        )
+        if mask_object == 'concat':
+            extra_ch = 1
+        elif mask_object == 'concat_down2_down4':
+            extra_ch = 3
+        else:
+            extra_ch = 0
+
+        if arch_version == 'v0':
+            decoder = nn.Sequential(
+                conv_blk(ni=3+extra_ch, nf=32, ks=3, stride=2),      # 128
+                conv_blk(ni=32, nf=32, ks=3),       # 128
+                conv_blk(ni=32, nf=64, ks=3, stride=2),     # 64
+                conv_blk(ni=64, nf=64, ks=3),       # 64
+                conv_blk(ni=64, nf=64, ks=3, stride=2),     # 32
+                conv_blk(ni=64, nf=128, ks=3, stride=2),    # 16
+                conv_blk(ni=128, nf=128, ks=3, stride=2),   # 8
+                Flatten(),
+                nn.Linear(flatten_dims, 512),
+                nn.ReLU(inplace=True),
+                nn.Linear(512, secret_len),
+            )
+        elif arch_version == 'v1':
+            decoder = nn.Sequential(
+                conv_blk(ni=3+extra_ch, nf=32, ks=3, stride=2),  # 128
+                conv_blk(ni=32, nf=32, ks=3),  # 128
+                nn.MaxPool2d(2, 2),  # 64
+                conv_blk(ni=32, nf=64, ks=3),  # 64
+                nn.MaxPool2d(2, 2),  # 32
+                conv_blk(ni=64, nf=64, ks=3),  # 32
+                nn.MaxPool2d(2, 2),  # 16
+                SAConvBNReLU(ni=64, nf=128, ks=3),  # 16
+                nn.MaxPool2d(2, 2),  # 8
+                SAConvBNReLU(ni=128, nf=128, ks=3),  # 8
+                Flatten(),
+                nn.Linear(flatten_dims, 512),
+                nn.ReLU(inplace=True),
+                nn.Linear(512, secret_len),
+            )
+        else:
+            raise NotImplementedError
+
+        self.decoder = decoder
+        self.mask_object = mask_object
 
     def forward(self, image, mask, normalize: bool = False):
-        image = image * mask.ge(0.5).int()
         if normalize:
             image = (image - 0.5) * 2.
+
+        if self.mask_object == 'mask':
+            image = image * mask
+        elif self.mask_object == 'concat':
+            image = torch.cat([mask, image], dim=1)
+        elif self.mask_object == 'concat_down2_down4':
+            mask_down2 = F.interpolate(mask, scale_factor=0.5, mode='bilinear')
+            pad_half = (mask.shape[2] - mask_down2.shape[2]) // 2
+            mask_down2 = F.pad(mask_down2, (pad_half, pad_half, pad_half, pad_half), mode='constant', value=0)
+
+            mask_down4 = F.interpolate(mask, scale_factor=0.25, mode='bilinear')
+            pad_half = (mask.shape[2] - mask_down4.shape[2]) // 2
+            mask_down4 = F.pad(mask_down4, (pad_half, pad_half, pad_half, pad_half), mode='constant', value=0)
+            image = torch.cat([mask, mask_down2, mask_down4, image], dim=1)
+        elif self.mask_object == 'batch_norm_mask':
+            image = BatchNormalizeMaskLayer.apply(image, mask)
+        elif self.mask_object is None:
+            pass
+        else:
+            raise NotImplementedError(f'Not implement for {self.mask_object}')
+
         secret_logits = self.decoder(image)
         return secret_logits
 

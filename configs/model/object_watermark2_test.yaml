@@ -1,0 +1,183 @@
+_target_: src.models.object_watermark2.ObjectWatermark2
+
+model_cfg:
+  image_shape: ${datamodule.dataset_cfg.image_shape}
+  msg_len: ${datamodule.dataset_cfg.msg_len}
+  adopt_seg_delay_step: 999999999
+  preprocess: False
+  mask_object_on_train: True
+  lr: 0.0005
+
+encoder:
+  _target_: src.models.encoder.StegaStampEncoder
+  image_shape: ${model.model_cfg.image_shape}
+  secret_len: ${model.model_cfg.msg_len}
+  out_channels: 3
+  conv_type: conv
+  multi_level_embed: [True, False, False, False, False]
+  embed_factor: 0  # Set to 0 for auto regression
+  embed_mode: space
+  mask_object: True
+  mask_msg: True
+  mask_residual: False
+  begin_ca: True
+  mid_sa: True
+
+decoder:
+  _target_: src.models.decoder.StegaStampWoSTNDecoder
+  image_shape: ${model.model_cfg.image_shape}
+  secret_len: ${model.model_cfg.msg_len}
+  conv_type: ${model.encoder.conv_type}
+  batch_normalize_mask : False
+
+augmenter:
+  _target_: src.models.augmenter.RandomSelectAugmenter
+  device: cuda
+
+  aug_dict:
+    # Attention, please use `RandomAffine` to conduct geometric distortions
+    # Since there is a hard code to recognize such a class.
+    Translate:
+      # Have done in copy-paste process
+      _target_: torch.nn.Identity
+    Rescale50:
+      _target_: kornia.augmentation.RandomAffine
+      degrees: 0
+      scale: [0.5, 0.5]
+      same_on_batch: True
+      p: 1.
+    Rescale75:
+      _target_: kornia.augmentation.RandomAffine
+      degrees: 0
+      scale: [0.75, 0.75]
+      same_on_batch: True
+      p: 1.
+    Rescale125:
+      _target_: kornia.augmentation.RandomAffine
+      degrees: 0
+      scale: [1.25, 1.25]
+      same_on_batch: True
+      p: 1.
+    Rescale150:
+      _target_: kornia.augmentation.RandomAffine
+      degrees: 0
+      scale: [1.5, 1.5]
+      same_on_batch: True
+      p: 1.
+    Rescale200:
+      _target_: kornia.augmentation.RandomAffine
+      degrees: 0
+      scale: [2.0, 2.0]
+      same_on_batch: True
+      p: 1.
+
+    GBlur01:
+      _target_: kornia.augmentation.RandomGaussianBlur
+      kernel_size: [7, 7]
+      sigma: [0.09, 0.1]
+    GBlur05:
+      _target_: kornia.augmentation.RandomGaussianBlur
+      kernel_size: [7, 7]
+      sigma: [0.4, 0.5]
+    GBlur10:
+      _target_: kornia.augmentation.RandomGaussianBlur
+      kernel_size: [7, 7]
+      sigma: [0.9, 1.0]
+    GBlur15:
+      _target_: kornia.augmentation.RandomGaussianBlur
+      kernel_size: [7, 7]
+      sigma: [1.4, 1.5]
+    GBlur20:
+      _target_: kornia.augmentation.RandomGaussianBlur
+      kernel_size: [7, 7]
+      sigma: [1.9, 2.0]
+
+    GNoise1:
+      _target_: kornia.augmentation.RandomGaussianNoise
+      mean: 0.
+      std: 0.01
+    GNoise2:
+      _target_: kornia.augmentation.RandomGaussianNoise
+      mean: 0.
+      std: 0.02
+    GNoise3:
+      _target_: kornia.augmentation.RandomGaussianNoise
+      mean: 0.
+      std: 0.03
+    GNoise4:
+      _target_: kornia.augmentation.RandomGaussianNoise
+      mean: 0.
+      std: 0.04
+    GNoise5:
+      _target_: kornia.augmentation.RandomGaussianNoise
+      mean: 0.
+      std: 0.05
+
+    JPEG10:
+      _target_: src.models.augmenter.DiffJPEG.DiffJPEG.DiffJPEG
+      height: 512
+      width: 512
+      differentiable: False
+      quality: 10
+    JPEG30:
+      _target_: src.models.augmenter.DiffJPEG.DiffJPEG.DiffJPEG
+      height: 512
+      width: 512
+      differentiable: False
+      quality: 30
+    JPEG50:
+      _target_: src.models.augmenter.DiffJPEG.DiffJPEG.DiffJPEG
+      height: 512
+      width: 512
+      differentiable: False
+      quality: 50
+    JPEG70:
+      _target_: src.models.augmenter.DiffJPEG.DiffJPEG.DiffJPEG
+      height: 512
+      width: 512
+      differentiable: False
+      quality: 70
+    JPEG90:
+      _target_: src.models.augmenter.DiffJPEG.DiffJPEG.DiffJPEG
+      height: 512
+      width: 512
+      differentiable: False
+      quality: 90
+
+    # Unseen noise
+    MedianBlur:
+      _target_: kornia.augmentation.RandomMedianBlur
+      kernel_size: [5, 5]
+      p: 1.
+    SaltAndPepper:
+      _target_: src.models.augmenter.SaltAndPepper
+      ratio: 0.1
+    Brightness:
+      _target_: kornia.augmentation.RandomBrightness
+      brightness: [0.8, 1.2]
+      p: 1.
+    Contrast:
+      _target_: kornia.augmentation.RandomContrast
+      contrast: [0.8, 1.2]
+      p: 1.
+    Saturation:
+      _target_: kornia.augmentation.RandomSaturation
+      saturation: [0.8, 1.2]
+      p: 1.
+    Hue:
+      _target_: kornia.augmentation.RandomHue
+      hue: [-0.1, 0.1]
+      p: 1.
+
+
+segmenter:
+  _target_: src.models.segmenter.SMPUNet
+
+syncor:
+  _target_: src.models.syncor.CentralMoment
+  output_size: [256, 256]
+  random_translate: True
+
+loss_fn: null
+
+loss_cfg: null

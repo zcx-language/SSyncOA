@@ -14,6 +14,7 @@ import kornia as K
 from torchvision.ops.boxes import masks_to_boxes
 from src.models.components.basic_block import (ConvBNReLU, DeformableConvBNReLU, DAConvBNReLU, SAConvBNReLU,
                                                Conv2D, Dense, DeformableConv2D, ResConvBNReLU, SEConvBNReLU)
+from src.models.components.forward_mask_layer import ForwardMaskLayer
 from fastai.layers import PixelShuffle_ICNR, SEBlock, SeparableBlock, ConvLayer
 from typing import Tuple, Optional, List
 
@@ -25,7 +26,12 @@ class StegaStampEncoder(nn.Module):
                  conv_type: str = 'conv',
                  multi_level_embed: List[bool] = [True, False, False, False, False],
                  embed_factor: float = 1.,     # set None for auto regressing a factor
-                 embed_mode: str = 'space'):
+                 embed_mode: str = 'space_resize',
+                 mask_object: Optional[str] = None,
+                 mask_msg: Optional[str] = None,
+                 mask_residual: bool = True,
+                 begin_ca: bool = True,
+                 mid_sa: bool = True):
         super().__init__()
 
         if conv_type == 'conv':
@@ -55,7 +61,7 @@ class StegaStampEncoder(nn.Module):
             )
         ch = 3
         self.embed_mode = embed_mode
-        if self.embed_mode == 'space':
+        if self.embed_mode[:5] == 'space':
             self.secret_processor = nn.Sequential(
                 nn.Linear(secret_len, 3 * 32 * 32),
                 nn.ReLU(inplace=True),
@@ -63,26 +69,43 @@ class StegaStampEncoder(nn.Module):
             ch = 3
         elif self.embed_mode == 'bbox':
             self.secret_processor1 = nn.Sequential(
-                nn.Linear(secret_len, 1 * 32 * 32),
+                nn.Linear(secret_len, 3 * 32 * 32),
                 nn.ReLU(inplace=True),
             )
-            self.secret_processor2 = nn.Sequential(
-                conv_blk(ni=1, nf=16, ks=3, stride=1),
-                conv_blk(ni=16, nf=32, ks=3, stride=1)
-            )
-            ch = 32
+            ch = 3
+            # self.secret_processor2 = nn.Sequential(
+            #     conv_blk(ni=3, nf=16, ks=3, stride=1),
+            #     conv_blk(ni=16, nf=32, ks=3, stride=1)
+            # )
         elif self.embed_mode == 'channel':
             ch = secret_len
         else:
             raise NotImplementedError
 
+        self.mask_object = mask_object
+        self.mask_msg = mask_msg
+        self.mask_residual = mask_residual
+
+        if mask_object == 'concat':
+            extra_ch = 1
+        elif mask_object == 'concat_down2_down4' or mask_object == 'concat_object':
+            extra_ch = 3
+        else:
+            extra_ch = 0
+
         level0, level1, level2, level3, level4 = self.multi_level_embed
-        self.conv1 = SEConvBNReLU(ni=3+ch*level0, nf=32, ks=3, stride=1)
+        if begin_ca:
+            self.conv1 = SEConvBNReLU(ni=3+ch*level0+extra_ch, nf=32, ks=3, stride=1)
+        else:
+            self.conv1 = conv_blk(ni=3+ch*level0+extra_ch, nf=32, ks=3, stride=1)
         self.conv2 = conv_blk(ni=32+ch*level1, nf=32, ks=3, stride=2)
         self.conv3 = conv_blk(ni=32+ch*level2, nf=64, ks=3, stride=2)
         self.conv4 = conv_blk(ni=64+ch*level3, nf=128, ks=3, stride=2)
 
-        self.conv5 = SAConvBNReLU(ni=128+ch*level4, nf=256, ks=3, stride=2)
+        if mid_sa:
+            self.conv5 = SAConvBNReLU(ni=128+ch*level4, nf=256, ks=3, stride=2)
+        else:
+            self.conv5 = conv_blk(ni=128+ch*level4, nf=256, ks=3, stride=2)
 
         self.conv6 = conv_blk(ni=256+ch*level4, nf=128, ks=3, stride=1)
         self.conv7 = conv_blk(ni=128+ch*level3, nf=64, ks=3, stride=1)
@@ -110,24 +133,49 @@ class StegaStampEncoder(nn.Module):
         )
 
     def embed_secret_bbox(self, secret: torch.tensor, mask: torch.Tensor):
-        secret = self.secret_processor1(secret).reshape(-1, 1, 32, 32)
-        refined_secret = torch.zeros_like(mask, dtype=torch.float)
+        batch_size, _, height, width = mask.shape
+        secret = self.secret_processor1(secret).reshape(-1, 3, 32, 32)
+        refined_secret = torch.zeros((batch_size, 3, height, width), device=mask.device, dtype=torch.float32)
         bboxes = masks_to_boxes(mask[:, 0])
         for batch_idx, bbox in enumerate(bboxes):
             x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
             height, width = y2 - y1, x2 - x1
             # import pdb; pdb.set_trace()
-            refined_secret[batch_idx:batch_idx+1, :, y1:y2, x1:x2] = F.interpolate(secret[batch_idx:batch_idx+1], (height, width), mode='nearest')
-        refined_secret = self.secret_processor2(refined_secret)
+            refined_secret[batch_idx:batch_idx+1, :, y1:y2, x1:x2] = F.interpolate(
+                secret[batch_idx:batch_idx+1], (height, width), mode='bilinear')
         return refined_secret
 
     def _reshape_secret(self, secret: torch.Tensor, mask: torch.tensor, output_shape: Tuple[int, int, int, int]):
         if self.embed_mode == 'channel':
             secret = secret.repeat(1, 1, *output_shape[-2:])
-            secret = secret * mask.repeat(1, secret.shape[1], 1, 1)
-        elif self.embed_mode == 'space':
-            secret = F.interpolate(secret, output_shape[-2:], mode='bilinear')
-            secret = secret * F.interpolate(mask, output_shape[-2:], mode='bilinear')
+            if self.mask_msg == 'mask':
+                secret = secret * mask.repeat(1, secret.shape[1], 1, 1)
+            elif self.mask_msg == 'forward_mask':
+                secret = ForwardMaskLayer.apply(secret, mask.repeat(1, secret.shape[1], 1, 1))
+            elif self.mask_msg == 'concat':
+                secret = torch.cat([mask, secret], dim=1)
+            elif self.mask_msg is None:
+                pass
+            else:
+                raise NotImplementedError
+        elif self.embed_mode[:5] == 'space':
+            if self.embed_mode[6:] == 'resize':
+                secret = F.interpolate(secret, output_shape[-2:], mode='bilinear')
+            elif self.embed_mode[6:] == 'repeat':
+                raise NotImplementedError(f'{self.embed_mode} has not yet been implemented')
+            else:
+                raise NotImplementedError
+
+            if self.mask_msg == 'mask':
+                secret = secret * F.interpolate(mask, output_shape[-2:], mode='bilinear')
+            elif self.mask_msg == 'forward_mask':
+                secret = ForwardMaskLayer.apply(secret, F.interpolate(mask, output_shape[-2:], mode='bilinear'))
+            elif self.mask_msg == 'concat':
+                secret = torch.cat([F.interpolate(mask, output_shape[-2:], mode='bilinear'), secret], dim=1)
+            elif self.mask_msg is None:
+                pass
+            else:
+                raise NotImplementedError
         elif self.embed_mode == 'bbox':
             secret = F.interpolate(secret, output_shape[-2:], mode='bilinear')
         else:
@@ -138,11 +186,32 @@ class StegaStampEncoder(nn.Module):
         if normalize:
             image = (image - 0.5) * 2.
             secret = (secret - 0.5) * 2.
-        image = image * mask
+
+        if self.mask_object == 'mask':
+            image = image * mask
+        elif self.mask_object == 'forward_mask':
+            image = ForwardMaskLayer.apply(image, mask)
+        elif self.mask_object == 'concat':
+            image = torch.cat([mask, image], dim=1)
+        elif self.mask_object == 'concat_object':
+            image = torch.cat([mask * image, image], dim=1)
+        elif self.mask_object == 'concat_down2_down4':
+            mask_down2 = F.interpolate(mask, scale_factor=0.5, mode='bilinear')
+            pad_half = (mask.shape[2] - mask_down2.shape[2]) // 2
+            mask_down2 = F.pad(mask_down2, (pad_half, pad_half, pad_half, pad_half), mode='constant', value=0)
+
+            mask_down4 = F.interpolate(mask, scale_factor=0.25, mode='bilinear')
+            pad_half = (mask.shape[2] - mask_down4.shape[2]) // 2
+            mask_down4 = F.pad(mask_down4, (pad_half, pad_half, pad_half, pad_half), mode='constant', value=0)
+            image = torch.cat([mask, mask_down2, mask_down4, image], dim=1)
+        elif self.mask_object is None:
+            pass
+        else:
+            raise NotImplementedError
 
         if self.embed_mode == 'channel':
             secret = secret.unsqueeze(-1).unsqueeze(-1)
-        elif self.embed_mode == 'space':
+        elif self.embed_mode[:5] == 'space':
             secret = self.secret_processor(secret).reshape(-1, 3, 32, 32)
         elif self.embed_mode == 'bbox':
             secret = self.embed_secret_bbox(secret, mask)
@@ -200,15 +269,19 @@ class StegaStampEncoder(nn.Module):
 
     def forward(self, image, mask, secret, normalize: bool = False):
         residual = self._forward(image, mask, secret, normalize) * self.embed_factor
-        # Ease edge effect
-        one_kernel = torch.ones(5, 5, device=mask.device)
-        erosion_mask = K.morphology.erosion(mask, one_kernel)
+        if self.mask_residual:
+            # Ease edge effect
+            one_kernel = torch.ones(5, 5, device=mask.device)
+            residual_mask = K.morphology.erosion(mask, one_kernel)
+        else:
+            residual_mask = torch.ones_like(mask)
+
         if self.out_channels == 3:
-            container = (image + erosion_mask * residual).clamp(0, 1)
+            container = (image + residual_mask * residual).clamp(0, 1)
         elif self.out_channels == 1:
             yuv_image = K.color.rgb_to_yuv(image)
             zeros_residual = torch.zeros_like(residual)
-            yuv_container = (yuv_image + erosion_mask * torch.cat([
+            yuv_container = (yuv_image + residual_mask * torch.cat([
                 residual, zeros_residual, zeros_residual
             ], dim=1)).clamp(0, 1)
             container = K.color.yuv_to_rgb(yuv_container)

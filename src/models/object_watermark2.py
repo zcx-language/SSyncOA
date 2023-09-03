@@ -18,9 +18,11 @@ import kornia as K
 from lightning import LightningModule, seed_everything
 from torchmetrics import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.classification import MultilabelAccuracy, BinaryJaccardIndex
+from src.metrics import Accumulation
 from omegaconf import DictConfig
 from lpips import LPIPS
 from src.models.discriminator import Discriminator
+from src.models.syncor.crop_out import CropOut
 from typing import Tuple, List, Any, Dict
 
 from src.utils import get_pylogger
@@ -32,14 +34,29 @@ def min_max_norm(x: torch.Tensor):
     return (x - x.min()) / (x.max() - x.min())
 
 
+def cal_mask_iou(pred_mask: torch.Tensor, target_mask: torch.Tensor, threshold: float = 0.5):
+    assert pred_mask.shape == target_mask.shape and target_mask.dim() == 2
+    assert pred_mask.min() >= 0 and pred_mask.max() <= 1
+    assert target_mask.min() >= 0 and target_mask.max() <= 1
+    pred_mask = pred_mask.ge(threshold).int()
+    target_mask = target_mask.ge(threshold).int()
+
+    intersection = (pred_mask & target_mask).sum()
+    union = (pred_mask | target_mask).sum()
+    return intersection.float() / union.float() if union > 0 else 0.
+
+
 LPIPS_FN = LPIPS(net='vgg')
 DISCRIMINATOR = Discriminator(in_channels=3)
+MASK_ACCUMULATOR = None
+RANDOM_SCALE = K.augmentation.RandomAffine(degrees=0, scale=(0.5, 1), same_on_batch=False, p=1.0).to('cuda')
+RANDOM_ROTATE = K.augmentation.RandomRotation(degrees=25, same_on_batch=False, p=1.0).to('cuda')
 
 
 class ObjectWatermark2(LightningModule):
     def __init__(self, model_cfg: DictConfig,
                  encoder: nn.Module,
-                 augmenter: nn.Module,
+                 augmenter: Any,
                  segmenter: nn.Module,
                  syncor: nn.Module,
                  decoder: nn.Module,
@@ -76,6 +93,9 @@ class ObjectWatermark2(LightningModule):
         self.val_ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
         self.val_bar = MultilabelAccuracy(num_labels=msg_len, threshold=0.5)
         self.val_iou = BinaryJaccardIndex(threshold=0.5)
+        # TODO: measure the IoU of the synced object instead of the segmentation
+        self.val_sync_iou = BinaryJaccardIndex(threshold=0.5)
+        self.val_correct_ratio = Accumulation()     # measure the corrected object ratio
         # self.val_par = MultilabelAccuracy(num_labels=512*512, threshold=0.5)
         # self.val_par = MultilabelAccuracy(num_labels=256*256, threshold=0.5)
 
@@ -88,6 +108,7 @@ class ObjectWatermark2(LightningModule):
         # For the combine distortion, which is random selected from these distortions
         self.test_bars['Combine'] = MultilabelAccuracy(num_labels=msg_len, threshold=0.5)
         self.test_ious['Combine'] = BinaryJaccardIndex(threshold=0.5)
+        self.test_correct_ratio = Accumulation()
         # self.test_par = MultilabelAccuracy(num_labels=256*256, threshold=0.5)
 
         # Log model arch to file
@@ -98,7 +119,7 @@ class ObjectWatermark2(LightningModule):
                  f'{summary(self.decoder, input_size=((1, 3, 256, 256), (1, 1, 256, 256)), depth=5, verbose=0)}')
 
     def forward(self, x: torch.Tensor):
-        pass
+        raise NotImplementedError(f'Please use `encode` or `decode` methods instead.')
 
     def encode(self, image: torch.Tensor, mask: torch.Tensor, msg: torch.Tensor):
         if len(image.shape) == 3 and len(mask.shape) == 3 and len(msg.shape) == 1:
@@ -114,7 +135,6 @@ class ObjectWatermark2(LightningModule):
             container = container.unsqueeze(0)
             mask = mask.unsqueeze(0)
         assert len(container.shape) == 4 and len(mask.shape) == 4
-        container, mask = container.to(self.device), mask.to(self.device)
         # FIXME:
         # sync_container, sync_mask = self.syncor(container, mask, normalize=True)
         return self.decoder(container, mask, normalize=True).squeeze(0)
@@ -127,11 +147,13 @@ class ObjectWatermark2(LightningModule):
         self.val_ssim.reset()
         self.val_bar.reset()
         self.val_iou.reset()
+        self.val_correct_ratio.reset()
 
         # Using global variable to avoid saving model in pickle
-        global LPIPS_FN, DISCRIMINATOR
+        global LPIPS_FN, DISCRIMINATOR, MASK_ACCUMULATOR
         LPIPS_FN = LPIPS_FN.to(self.device)
         DISCRIMINATOR = DISCRIMINATOR.to(self.device)
+        MASK_ACCUMULATOR = torch.zeros(self.model_cfg.image_shape[-2:]).to(self.device)  # Avoid zero division
 
     def shared_step(self, batch: Any, phase: str = 'train'):
         host, mask, msg, bg_img = batch
@@ -148,8 +170,24 @@ class ObjectWatermark2(LightningModule):
         msg = msg.reshape(-1, *msg.shape[2:])
         bg_img = bg_img.reshape(-1, *bg_img.shape[2:])
 
+        if self.model_cfg.preprocess_bbox_crop_out:
+            # Used for CropOut sync manner only.
+            bbox_crop_out = CropOut(self.model_cfg.image_shape[-2:])
+            host, mask = bbox_crop_out(host, mask)
+        # if self.model_cfg.preprocess_random_translate:
+        #     # Have implemented in the dataloader, so do nothing here
+        #     pass
+        if self.model_cfg.preprocess_random_scale:
+            global RANDOM_SCALE
+            host = RANDOM_SCALE(host)
+            mask = RANDOM_SCALE(mask.float(), params=RANDOM_SCALE._params)
+        if self.model_cfg.preprocess_random_rotate:
+            global RANDOM_ROTATE
+            host = RANDOM_ROTATE(host)
+            mask = RANDOM_ROTATE(mask.float(), params=RANDOM_ROTATE._params)
+
         # Embed object or the whole image
-        if not self.model_cfg.mask_object:
+        if not self.model_cfg.mask_object_on_train and phase == 'train':
             mask = torch.ones_like(mask)
 
         # Encode
@@ -166,10 +204,8 @@ class ObjectWatermark2(LightningModule):
             if self.total_steps >= self.model_cfg.adopt_seg_delay_step:
                 object_mask = []
                 for pred_mask, gt_mask in zip(pred_masks, gt_masks):
-                    intersection = (pred_mask & gt_mask).sum()
-                    union = (pred_mask | gt_mask).sum()
-                    iou = intersection.float() / union.float() if union > 0 else 0.
-                    if iou > 0.97:
+                    iou = cal_mask_iou(pred_mask[0], gt_mask[0])
+                    if iou > self.model_cfg.iou_thresh_for_segment_pred:
                         object_mask.append(pred_mask)
                     else:
                         object_mask.append(gt_mask)
@@ -207,7 +243,7 @@ class ObjectWatermark2(LightningModule):
 
         # Calculate loss and optimize
         # Optimize discriminator
-        if batch_idx % 3 == 0:
+        if batch_idx % 3 == 0 and self.loss_cfg.vis_weight3:
             dis_loss = DISCRIMINATOR.optimize_parameters(wm_ob, ob)
             self.log('train/dis_loss', dis_loss)
 
@@ -226,28 +262,52 @@ class ObjectWatermark2(LightningModule):
         # plt.imshow(residual[0].permute(1, 2, 0).cpu().detach().numpy())
         # plt.show()
         # plt.close()
-        if self.loss_cfg.edge_weight:
-            edge_weight = 1.0 - K.filters.laplacian(K.color.rgb_to_grayscale(ob), kernel_size=5).clamp(0., 1.)
+        if self.loss_cfg.accu_mask_weight:
+            global MASK_ACCUMULATOR
+            cur_mask_accumulator = mask.sum(dim=[0, 1]) / (mask.shape[0] * mask.shape[1])
+            MASK_ACCUMULATOR = MASK_ACCUMULATOR * 0.9 + cur_mask_accumulator * 0.1
+            accu_mask_weight = MASK_ACCUMULATOR.unsqueeze(dim=0).unsqueeze(dim=0)
+            # Ensure the background will not be decreased to zero
+            accu_mask_weight = accu_mask_weight + torch.ones_like(accu_mask_weight)
         else:
-            edge_weight = torch.ones_like(residual)
-        vis_loss1 = self.loss_fn.pix_loss(residual * edge_weight, torch.zeros_like(residual)) * self.loss_cfg.vis_weight1
-        vis_loss2 = LPIPS_FN(wm_ob, ob, normalize=True).mean() * self.loss_cfg.vis_weight2
-        vis_loss3 = -DISCRIMINATOR(wm_ob).mean() * self.loss_cfg.vis_weight3
-        vis_loss = (vis_loss1 + vis_loss2 + vis_loss3) * self.loss_cfg.vis_weight if self.total_steps > self.loss_cfg.vis_delay_step else 0.
+            accu_mask_weight = torch.ones_like(residual)
+        vis_loss1 = self.loss_fn.pix_loss(residual * accu_mask_weight,
+                                          torch.zeros_like(residual)) * self.loss_cfg.vis_weight1
+
+        if self.loss_cfg.vis_weight2:
+            if self.loss_cfg.lpips_mask:
+                vis_loss2 = LPIPS_FN(wm_ob, ob, normalize=True).mean() * self.loss_cfg.vis_weight2
+            else:
+                vis_loss2 = LPIPS_FN(container, host, normalize=True).mean() * self.loss_cfg.vis_weight2
+            vis_loss2 = 0. if torch.isnan(vis_loss2) else vis_loss2
+        else:
+            vis_loss2 = 0.
+
+        if self.loss_cfg.vis_weight3:
+            vis_loss3 = -DISCRIMINATOR(wm_ob).mean() * self.loss_cfg.vis_weight3
+            vis_loss3 = 0. if torch.isnan(vis_loss3) else vis_loss3
+        else:
+            vis_loss3 = 0.
+        vis_loss = (vis_loss1 + vis_loss2 + vis_loss3) * self.loss_cfg.vis_weight
+        if self.total_steps <= self.loss_cfg.vis_delay_step:
+            vis_loss = 0.
+
         # Decode loss
         msg_loss = F.binary_cross_entropy_with_logits(msg_hat_logit, msg.float()) * self.loss_cfg.msg_weight
+
         enc_dec_optim.zero_grad()
         self.manual_backward(vis_loss + msg_loss)
-        nn.utils.clip_grad_norm_([*self.encoder.parameters(),
-                                  *self.decoder.parameters()], max_norm=100)
+        nn.utils.clip_grad_value_([*self.encoder.parameters(),
+                                   *self.decoder.parameters()], clip_value=10)
         enc_dec_optim.step()
 
         # Segment loss
         # seg_loss = F.binary_cross_entropy_with_logits(seg_mask_logits, aug_mask.float()) * self.loss_cfg.seg_weight
         seg_loss = K.losses.lovasz_hinge_loss(seg_mask_logits, aug_mask[:, 0]) * self.loss_cfg.seg_weight
+        seg_loss = torch.tensor(0., requires_grad=True, device=self.device) if torch.isnan(seg_loss) else seg_loss
         seg_sync_optim.zero_grad()
         self.manual_backward(seg_loss)
-        nn.utils.clip_grad_norm_([*self.segmenter.parameters()], max_norm=100)
+        nn.utils.clip_grad_value_([*self.segmenter.parameters()], clip_value=10)
         seg_sync_optim.step()
 
         self.log('train/vis_loss1', vis_loss1)
@@ -271,20 +331,20 @@ class ObjectWatermark2(LightningModule):
         if self.total_steps % 300 == 0:
             show_image = dict(
                 ob1=torch.cat([
-                    host[:1] * mask[:1],
+                    host[:1] * mask[:1] + torch.ones_like(mask[:1]) * (1 - mask[:1]),
                     min_max_norm(residual[:1] if residual.shape[1] == 3 else residual[:1].repeat(1, 3, 1, 1)),
                     container[:1],
                     F.interpolate(aug_container[:1], size=tuple(image_size)),
                     F.interpolate(aug_container[:1] * aug_mask[:1], size=tuple(image_size)),
-                    sync_object_patch[:1] * sync_mask_patch[:1],
+                    sync_object_patch[:1] * sync_mask_patch[:1] + torch.ones_like(sync_mask_patch[:1]) * (1 - sync_mask_patch[:1]),
                 ], dim=0),
                 ob2=torch.cat([
-                    host[1:2] * mask[1:2],
-                    residual[1:2].clamp(0, 1) if residual.shape[1] == 3 else residual[1:2].repeat(1, 3, 1, 1).clamp(0, 1),
+                    host[1:2] * mask[1:2] + torch.ones_like(mask[1:2]) * (1 - mask[1:2]),
+                    min_max_norm(residual[1:2] if residual.shape[1] == 3 else residual[1:2].repeat(1, 3, 1, 1)),
                     container[1:2],
                     F.interpolate(aug_container[1:2], size=tuple(image_size)),
                     F.interpolate(aug_container[1:2] * aug_mask[1:2], size=tuple(image_size)),
-                    sync_object_patch[1:2] * sync_mask_patch[1:2],
+                    sync_object_patch[1:2] * sync_mask_patch[1:2] + torch.ones_like(sync_mask_patch[1:2]) * (1 - sync_mask_patch[1:2]),
                 ], dim=0),
             )
             self.visualize2logger('train', show_image, self.total_steps)
@@ -312,26 +372,33 @@ class ObjectWatermark2(LightningModule):
             self.val_bar.update(msg_hat_logit.sigmoid(), msg)
             self.val_iou.update(seg_mask_logits.sigmoid(), aug_mask)
 
+            correct_num = 0
+            for pred_mask, gt_mask in zip(sync_mask_patch, mask):
+                iou = cal_mask_iou(pred_mask[0], gt_mask[0])
+                if iou > self.model_cfg.iou_thresh_for_correct_ratio:
+                    correct_num += 1
+            self.val_correct_ratio.update(correct_num, mask.shape[0])
+
         # Visualize
         image_size = self.model_cfg.image_shape[-2:]
         if batch_idx == 0:
             # import pdb; pdb.set_trace()
             show_image = dict(
                 ob1=torch.cat([
-                    host[:1] * mask[:1],
+                    host[:1] * mask[:1] + torch.ones_like(mask[:1]) * (1 - mask[:1]),
                     min_max_norm(residual[:1] if residual.shape[1] == 3 else residual[:1].repeat(1, 3, 1, 1)),
                     container[:1],
                     F.interpolate(aug_container[:1], size=tuple(image_size)),
                     F.interpolate(aug_container[:1] * aug_mask[:1], size=tuple(image_size)),
-                    sync_object_patch[:1] * sync_mask_patch[:1],
+                    sync_object_patch[:1] * sync_mask_patch[:1] + torch.ones_like(sync_mask_patch[:1]) * (1 - sync_mask_patch[:1]),
                 ], dim=0),
                 ob2=torch.cat([
-                    host[1:2] * mask[1:2],
-                    residual[1:2].clamp(0, 1) if residual.shape[1] == 3 else residual[1:2].repeat(1, 3, 1, 1).clamp(0, 1),
+                    host[1:2] * mask[1:2] + torch.ones_like(mask[1:2]) * (1 - mask[1:2]),
+                    min_max_norm(residual[1:2] if residual.shape[1] == 3 else residual[1:2].repeat(1, 3, 1, 1)),
                     container[1:2],
                     F.interpolate(aug_container[1:2], size=tuple(image_size)),
                     F.interpolate(aug_container[1:2] * aug_mask[1:2], size=tuple(image_size)),
-                    sync_object_patch[1:2] * sync_mask_patch[1:2],
+                    sync_object_patch[1:2] * sync_mask_patch[1:2] + torch.ones_like(sync_mask_patch[1:2]) * (1 - sync_mask_patch[1:2]),
                 ], dim=0)
             )
             self.visualize2logger('val', show_image, self.total_steps)
@@ -341,16 +408,19 @@ class ObjectWatermark2(LightningModule):
         ssim = self.val_ssim.compute()
         bar = self.val_bar.compute()
         iou = self.val_iou.compute()
+        correct_ratio = self.val_correct_ratio.compute()
 
         self.val_psnr.reset()
         self.val_ssim.reset()
         self.val_bar.reset()
         self.val_iou.reset()
+        self.val_correct_ratio.reset()
 
         self.logger_instance.add_scalar('val/psnr', psnr, self.total_steps)
         self.logger_instance.add_scalar('val/ssim', ssim, self.total_steps)
         self.logger_instance.add_scalar('val/bar', bar, self.total_steps)
         self.logger_instance.add_scalar('val/iou', iou, self.total_steps)
+        self.logger_instance.add_scalar('val/correct_ratio', correct_ratio, self.total_steps)
 
         # Log for checkpoint callback
         self.log('hp_metric', bar + (psnr / 50))
@@ -359,7 +429,8 @@ class ObjectWatermark2(LightningModule):
         self.log('bar', bar, logger=False)
 
         # Log to file
-        log.info(f'Step: {self.total_steps}: psnr={psnr:.4f}, ssim={ssim:.4f}, bar={bar:.4f}, iou={iou:.4f}')
+        log.info(f'Step: {self.total_steps}: psnr={psnr:.4f}, ssim={ssim:.4f}, '
+                 f'bar={bar:.4f}, iou={iou:.4f}, correct_ratio={correct_ratio:.4f}')
         pass
 
     def on_test_start(self) -> None:
@@ -395,29 +466,55 @@ class ObjectWatermark2(LightningModule):
         sync_object_patch = sync_object_patch_dict[rnd_aug_name]
         sync_mask_patch = sync_mask_patch_dict[rnd_aug_name]
 
+        with torch.no_grad():
+            correct_num = 0
+            for pred_mask, gt_mask in zip(sync_mask_patch, mask):
+                iou = cal_mask_iou(pred_mask[0], gt_mask[0])
+                if iou > self.model_cfg.iou_thresh_for_correct_ratio:
+                    correct_num += 1
+            self.test_correct_ratio.update(correct_num, mask.shape[0])
+
         image_size = self.model_cfg.image_shape[-2:]
-        if batch_idx % 30 == 0:
-            show_image = dict(
-                ob1=torch.cat([
-                    host[:1] * mask[:1],
-                    min_max_norm(residual[:1] if residual.shape[1] == 3 else residual[:1].repeat(1, 3, 1, 1)),
-                    container[:1],
-                    F.interpolate(aug_container[:1], size=tuple(image_size)),
-                    F.interpolate(aug_container[:1] * aug_mask[:1], size=tuple(image_size)),
-                    sync_object_patch[:1] * sync_mask_patch[:1]
-                ], dim=0)
-            )
-            self.visualize2logger('test', show_image, batch_idx)
+        show_image = dict(
+            ob1=torch.cat([
+                host[:1] * mask[:1] + torch.ones_like(mask[:1]) * (1 - mask[:1]),
+                min_max_norm(residual[:1] if residual.shape[1] == 3 else residual[:1].repeat(1, 3, 1, 1)),
+                container[:1],
+                F.interpolate(aug_container[:1], size=tuple(image_size)),
+                F.interpolate(aug_container[:1] * aug_mask[:1], size=tuple(image_size)),
+                sync_object_patch[:1] * sync_mask_patch[:1] + torch.ones_like(sync_mask_patch[:1]) * (1 - sync_mask_patch[:1]),
+            ], dim=0),
+            ob2=torch.cat([
+                host[1:2] * mask[1:2] + torch.ones_like(mask[1:2]) * (1 - mask[1:2]),
+                min_max_norm(residual[1:2] if residual.shape[1] == 3 else residual[1:2].repeat(1, 3, 1, 1)),
+                container[1:2],
+                F.interpolate(aug_container[1:2], size=tuple(image_size)),
+                F.interpolate(aug_container[1:2] * aug_mask[1:2], size=tuple(image_size)),
+                sync_object_patch[1:2] * sync_mask_patch[1:2] + torch.ones_like(sync_mask_patch[1:2]) * (1 - sync_mask_patch[1:2]),
+            ], dim=0),
+            ob3=torch.cat([
+                host[2:3] * mask[2:3] + torch.ones_like(mask[2:3]) * (1 - mask[2:3]),
+                min_max_norm(residual[2:3] if residual.shape[1] == 3 else residual[2:3].repeat(1, 3, 1, 1)),
+                container[2:3],
+                F.interpolate(aug_container[2:3], size=tuple(image_size)),
+                F.interpolate(aug_container[2:3] * aug_mask[2:3], size=tuple(image_size)),
+                sync_object_patch[2:3] * sync_mask_patch[2:3] + torch.ones_like(sync_mask_patch[2:3]) * (1 - sync_mask_patch[2:3]),
+            ], dim=0)
+        )
+        self.visualize2logger('test', show_image, batch_idx)
 
     def on_test_epoch_end(self) -> None:
         psnr = self.test_psnr.compute()
         ssim = self.test_ssim.compute()
+        correct_ratio = self.test_correct_ratio.compute()
         self.test_psnr.reset()
         self.test_ssim.reset()
+        self.test_correct_ratio.reset()
         self.logger_instance.add_scalar('test/psnr', psnr, self.total_steps)
         self.logger_instance.add_scalar('test/ssim', ssim, self.total_steps)
+        self.logger_instance.add_scalar('test/correct_ratio', correct_ratio, self.total_steps)
 
-        log.info(f'Test: psnr={psnr:.4f}, ssim={ssim:.4f}')
+        log.info(f'Test: psnr={psnr:.4f}, ssim={ssim:.4f}, correct_ratio={correct_ratio:.4f}')
 
         for aug_name in ['Combine'] + list(self.augmenter.augment_types):
             bar = self.test_bars[aug_name].compute()

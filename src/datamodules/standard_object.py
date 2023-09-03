@@ -170,6 +170,11 @@ def standard_object(image: np.ndarray, mask: np.ndarray):
 
 
 def run():
+    image_path = Path('/sda1/Datasets/DUTS/DUTS-TE/DUTS-TE-Image/ILSVRC2012_test_00000025.jpg')
+    mask_path = Path('/sda1/Datasets/DUTS/DUTS-TE/DUTS-TE-Mask/ILSVRC2012_test_00000025.png')
+    image = cv2.cvtColor(cv2.imread(str(image_path)), cv2.COLOR_BGR2RGB)
+    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+    std_img, std_mask = standard_object(image, mask)
     pass
 
 

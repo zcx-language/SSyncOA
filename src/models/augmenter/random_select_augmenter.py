@@ -14,17 +14,20 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from kornia.augmentation import RandomMotionBlur, ColorJitter, RandomGaussianNoise, RandomAffine, RandomGaussianBlur
+from kornia.augmentation import (RandomMotionBlur, ColorJitter, RandomGaussianNoise, RandomAffine, RandomGaussianBlur,
+                                 RandomMedianBlur, RandomBrightness, RandomContrast, RandomSaturation, RandomHue)
 from kornia.morphology import erosion, dilation
 from omegaconf import DictConfig
 
 from typing import List, Dict, Optional
 
 
-class RandomSelectAugmenter(nn.Module):
-    def __init__(self, aug_dict: DictConfig):
+class RandomSelectAugmenter:
+    def __init__(self, aug_dict: DictConfig, device: str = 'cpu'):
         super().__init__()
-        self.aug_dict = nn.ModuleDict(aug_dict)
+        self.aug_dict = nn.ModuleDict(aug_dict).to(device)
+        # global AUG_DICT
+        # AUG_DICT = nn.ModuleDict(aug_dict).to('cuda')
 
     @property
     def augment_types(self):
@@ -45,17 +48,20 @@ class RandomSelectAugmenter(nn.Module):
                                 width_pad_half, width_pad - width_pad_half))
 
         aug = self.aug_dict[aug_name]
-        if aug_name.lower() == 'affine':
+        if aug._get_name() == 'RandomAffine':
             aug_container = aug(aug_container)
             aug_mask = aug(aug_mask, params=aug._params)
-            # 60 ~ 64 = (512 - 256*1.5) / 2, 1.5 is the largest scale factor
-            h_shift = np.random.randint(-60, 60)
-            w_shift = np.random.randint(-60, 60)
-            aug_container = torch.roll(aug_container, shifts=(h_shift, w_shift), dims=(-2, -1))
-            aug_mask = torch.roll(aug_mask, shifts=(h_shift, w_shift), dims=(-2, -1))
-            # import pdb; pdb.set_trace()
+            # Here, we manually translate the object so that it is not out of the image
+            scale_low, scale_high = aug._param_generator.scale
+            shift_range = (bg_width - co_width * scale_high) // 2
+            if shift_range > 0:
+                h_shift = np.random.randint(-shift_range, shift_range)
+                w_shift = np.random.randint(-shift_range, shift_range)
+                aug_container = torch.roll(aug_container, shifts=(h_shift, w_shift), dims=(-2, -1))
+                aug_mask = torch.roll(aug_mask, shifts=(h_shift, w_shift), dims=(-2, -1))
             aug_container = aug_container * aug_mask + background_image * (1 - aug_mask)
         else:
+            # Here, we manually translate the object so that it is not out of the image
             # 100 ~ 128 = (512 - 256) / 2
             h_shift = np.random.randint(-100, 100)
             w_shift = np.random.randint(-100, 100)
@@ -65,7 +71,7 @@ class RandomSelectAugmenter(nn.Module):
             aug_container = aug(aug_container).clamp(0, 1)
         return aug_container, aug_mask.ge(0.5).int()
 
-    def forward(self, container: torch.Tensor,
+    def __call__(self, container: torch.Tensor,
                 mask: torch.Tensor,
                 background_image: torch.Tensor,
                 num_steps: int,

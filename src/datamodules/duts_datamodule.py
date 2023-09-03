@@ -31,18 +31,26 @@ class DUTSDataset(Dataset):
                  image_shape: Tuple[int, int, int] = (3, 256, 256),
                  msg_len: int = 32,
                  num_backgrounds: int = 1,
-                 stage: str = 'train'):
+                 stage: str = 'train',
+                 random_translate: bool = False,    # Random translate the standard object and mask so that they are not centered in the image
+                 add_all_one_masks: bool = False):  # Add the mask that all pixels are 1, i.e., the object occupies the entire image
         super().__init__()
         assert stage.lower() in ['train', 'val', 'test']
         data_dir = Path(data_dir)
         self.image_shape = image_shape
         self.msg_len = msg_len
         self.num_backgrounds = num_backgrounds
+        self.random_translate = random_translate
+        self.add_all_one_masks = add_all_one_masks
 
         if stage.lower() == 'train':
             img_dir = data_dir / 'DUTS-TR' / 'Std-Image-30'
             mask_dir = data_dir / 'DUTS-TR' / 'Std-Mask-30'
-            mask_paths = sorted(mask_dir.glob('*.png'))
+            mask_paths = list(mask_dir.glob('*.png'))
+
+            if self.add_all_one_masks:
+                all_one_mask_dir = data_dir / 'DUTS-TR' / 'Std-Mask-30-All'
+                mask_paths += list(all_one_mask_dir.glob('*.png'))
         else:
             img_dir = data_dir / 'DUTS-TE' / 'Std-Image-30'
             mask_dir = data_dir / 'DUTS-TE' / 'Std-Mask-30'
@@ -55,7 +63,7 @@ class DUTSDataset(Dataset):
                 mask_paths = mask_paths[mask_num//2:]
 
         self.img_dir = img_dir
-        self.mask_paths = mask_paths
+        self.mask_paths = sorted(mask_paths)
 
         bg_image_dir = data_dir / 'DUTS-TR' / 'DUTS-TR-Image'
         self.bg_image_paths = list(bg_image_dir.glob('*.jpg'))
@@ -67,12 +75,43 @@ class DUTSDataset(Dataset):
         return len(self.mask_paths)
 
     def __getitem__(self, idx):
-        img_path = self.img_dir / f'{self.mask_paths[idx].stem}.jpg'
         mask_path = self.mask_paths[idx]
-        img = self.to_tensor(
-            cv2.cvtColor(cv2.imread(str(img_path)), cv2.COLOR_BGR2RGB))
-        mask = self.to_tensor(
-            cv2.threshold(cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE), 127, 255, cv2.THRESH_BINARY)[1])
+        img_path = self.img_dir / f'{mask_path.stem}.jpg'
+        img = cv2.cvtColor(cv2.imread(str(img_path)), cv2.COLOR_BGR2RGB)
+        mask = cv2.threshold(cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE), 127, 255, cv2.THRESH_BINARY)[1]
+        orig_img = img.copy()
+        orig_mask = mask.copy()
+
+        if self.random_translate:
+            # Here, we manually translate the object while ensuring it is not out of the image
+            ind_h, ind_w = np.where(mask == 255)
+            margin_u, margin_d = np.min(ind_h), mask.shape[0] - 1 - np.max(ind_h)
+            margin_l, margin_r = np.min(ind_w), mask.shape[1] - 1 - np.max(ind_w)
+            if margin_u + margin_d > 0:
+                shift_h = np.random.randint(-margin_u, margin_d)
+            else:
+                shift_h = 0
+            if margin_l + margin_r > 0:
+                shift_w = np.random.randint(-margin_l, margin_r)
+            else:
+                shift_w = 0
+            # print(shift_w, shift_h, np.mean(mask))
+            mask = np.roll(mask, shift=(shift_h, shift_w), axis=(0, 1))
+            img = np.roll(img, shift=(shift_h, shift_w), axis=(0, 1))
+
+        # import matplotlib.pyplot as plt
+        # plt.subplot(221)
+        # plt.imshow(orig_img)
+        # plt.subplot(222)
+        # plt.imshow(orig_mask, cmap='gray')
+        # plt.subplot(223)
+        # plt.imshow(img)
+        # plt.subplot(224)
+        # plt.imshow(mask, cmap='gray')
+        # plt.show()
+        # plt.close()
+        img, mask = self.to_tensor(img), self.to_tensor(mask)
+
         msg = torch.randint(0, 2, (self.num_backgrounds, self.msg_len))
         bg_img = []
         for _ in range(self.num_backgrounds):

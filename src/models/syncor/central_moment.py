@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import numpy as np
+#
 # @Project      : ObjectWatermark
 # @File         : central_moment.py
 # @Author       : chengxin
 # @Email        : zcx_language@163.com
 # @Reference    : None
 # @CreateTime   : 2023/7/29 17:46
-
+#
 # Import lib here
 import numpy as np
 import cv2
@@ -16,16 +16,29 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from kornia.geometry import rotate
+from kornia.augmentation import RandomRotation, RandomTranslate, RandomAffine
+from .crop_out import CropOut
 from PIL import Image
 
 from typing import Tuple
 
 
 class CentralMoment(nn.Module):
-    def __init__(self, output_size: Tuple[int, int]):
+    def __init__(self, output_size: Tuple[int, int],
+                 random_translate: bool = False,
+                 random_scale: bool = False,
+                 random_rotate: bool = False,
+                 bbox_crop_out: bool = False):
         super().__init__()
         self.output_size = tuple(output_size)
-        pass
+        self.random_translate = random_translate
+        self.random_scale = RandomAffine(degrees=0., scale=(0.5, 1.0), same_on_batch=False, p=1.) if random_scale else False
+        self.random_rotate = RandomRotation(degrees=25., same_on_batch=False, p=1.) if random_rotate else False
+
+        if bbox_crop_out:
+            self.bbox_crop_out = CropOut(output_size)
+        else:
+            self.bbox_crop_out = None
 
     def standardize(self, image: torch.Tensor,
                     mask: np.ndarray):
@@ -122,6 +135,23 @@ class CentralMoment(nn.Module):
         std_mask = cv2.resize(crop_mask, self.output_size, interpolation=cv2.INTER_LINEAR)
         std_mask = cv2.threshold(std_mask, 127, 255, cv2.THRESH_BINARY)[1]
         std_img = F.interpolate(crop_img.unsqueeze(0), self.output_size, mode='bilinear')[0]
+
+        if self.random_translate:
+            # Here, we manually translate the object while ensuring it is not out of the image
+            ind_h, ind_w = np.where(std_mask == 255)
+            margin_u, margin_d = np.min(ind_h), std_mask.shape[0] - 1 - np.max(ind_h)
+            margin_l, margin_r = np.min(ind_w), std_mask.shape[1] - 1 - np.max(ind_w)
+            if margin_u + margin_d > 0:
+                shift_h = np.random.randint(-margin_u, margin_d)
+            else:
+                shift_h = 0
+            if margin_l + margin_r > 0:
+                shift_w = np.random.randint(-margin_l, margin_r)
+            else:
+                shift_w = 0
+            # print(shift_w, shift_h, np.mean(mask))
+            std_mask = np.roll(std_mask, shift=(shift_h, shift_w), axis=(0, 1))
+            std_img = torch.roll(std_img, shifts=(shift_h, shift_w), dims=(-2, -1))
         return std_img, std_mask
 
     def forward(self, images: torch.Tensor,
@@ -133,10 +163,25 @@ class CentralMoment(nn.Module):
             img = images[idx]
             mask = np.clip(masks[idx, 0] * 255, 0, 255).astype(np.uint8)
             std_img, std_mask = self.standardize(img, mask)
+            std_mask = torch.tensor(std_mask/255., dtype=torch.int, device=images.device).unsqueeze(0)
             std_imgs.append(std_img)
-            std_masks.append(torch.tensor(std_mask/255., dtype=torch.int, device=images.device).unsqueeze(0))
+            std_masks.append(std_mask)
         std_imgs = torch.stack(std_imgs, dim=0)
         std_masks = torch.stack(std_masks, dim=0)
+
+        # Random translate, scale and rotate for each image, please do not do it in batch
+        if self.random_translate:
+            # Have implemented in standardize, so do nothing here
+            pass
+        if self.random_scale:
+            std_imgs = self.random_scale(std_imgs)
+            std_masks = self.random_scale(std_masks.float(), params=self.random_scale._params)
+        if self.random_rotate:
+            std_imgs = self.random_rotate(std_imgs)
+            std_masks = self.random_rotate(std_masks.float(), params=self.random_rotate._params)
+
+        if self.bbox_crop_out:
+            std_imgs, std_masks = self.bbox_crop_out(std_imgs, std_masks)
         return std_imgs, std_masks
 
 

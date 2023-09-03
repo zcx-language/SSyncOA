@@ -12,6 +12,7 @@
 from .augmenter import Augmenter
 from .geometric_copypaste_noise import GeometricCopypasteNoise
 from .random_select_augmenter import RandomSelectAugmenter
+from .salt_and_pepper import SaltAndPepper
 
 
 def run():
