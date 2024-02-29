@@ -3,9 +3,17 @@ _target_: src.models.object_watermark2.ObjectWatermark2
 model_cfg:
   image_shape: ${datamodule.dataset_cfg.image_shape}
   msg_len: ${datamodule.dataset_cfg.msg_len}
-  adopt_seg_delay_step: 999999999
-  preprocess: False
+  adopt_seg_delay_step: 10000
+  preprocess_bbox_crop_out: False
+  # Please use `datamodule.dataset_cfg.random_translate`
+  # preprocess_random_translate: ???
+  preprocess_random_scale: False
+  preprocess_random_rotate: False
   mask_object_on_train: True
+  iou_thresh_for_segment_pred: 0.97
+  iou_thresh_for_correct_ratio: 0.97
+  adopt_all_seg_mask: False
+  adopt_all_gt_mask: False
   lr: 0.0005
 
 encoder:
@@ -15,10 +23,10 @@ encoder:
   out_channels: 3
   conv_type: conv
   multi_level_embed: [True, False, False, False, False]
-  embed_factor: 0  # Set to 0 for auto regression
-  embed_mode: space
-  mask_object: True
-  mask_msg: True
+  embed_factor: ???  # Set to 0 for auto regression
+  embed_mode: space_resize
+  mask_object: mask
+  mask_msg: null
   mask_residual: False
   begin_ca: True
   mid_sa: True
@@ -28,7 +36,8 @@ decoder:
   image_shape: ${model.model_cfg.image_shape}
   secret_len: ${model.model_cfg.msg_len}
   conv_type: ${model.encoder.conv_type}
-  batch_normalize_mask : False
+  mask_object: mask
+  arch_version: v0
 
 augmenter:
   _target_: src.models.augmenter.RandomSelectAugmenter
@@ -176,7 +185,10 @@ segmenter:
 syncor:
   _target_: src.models.syncor.CentralMoment
   output_size: [256, 256]
-  random_translate: True
+  random_translate: False
+  random_scale: False
+  random_rotate: False
+  bbox_crop_out: False
 
 loss_fn: null
 

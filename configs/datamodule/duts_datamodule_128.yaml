@@ -1,9 +1,9 @@
 _target_: src.datamodules.DUTSDataModule
 dataset_cfg:
   data_dir: ${paths.data_dir}/DUTS
-  image_shape: [3, 256, 256]
+  image_shape: [3, 128, 128]
   msg_len: 30
-  background_shape: [3, 512, 512]
+  background_shape: [3, 256, 256]
   # number of background images for each object, real batch size is the product of this and batch_size
   num_backgrounds: 1
   random_translate: False

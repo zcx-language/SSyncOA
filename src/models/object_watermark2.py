@@ -36,8 +36,8 @@ def min_max_norm(x: torch.Tensor):
 
 def cal_mask_iou(pred_mask: torch.Tensor, target_mask: torch.Tensor, threshold: float = 0.5):
     assert pred_mask.shape == target_mask.shape and target_mask.dim() == 2
-    assert pred_mask.min() >= 0 and pred_mask.max() <= 1
-    assert target_mask.min() >= 0 and target_mask.max() <= 1
+    assert pred_mask.min() >= 0 and pred_mask.max() <= 1, f'Got predict in range [{pred_mask.min()}, {pred_mask.max()}]'
+    assert target_mask.min() >= 0 and target_mask.max() <= 1, f'Got target in range [{target_mask.min()}, {target_mask.max()}]'
     pred_mask = pred_mask.ge(threshold).int()
     target_mask = target_mask.ge(threshold).int()
 
@@ -105,23 +105,28 @@ class ObjectWatermark2(LightningModule):
             key: MultilabelAccuracy(num_labels=msg_len, threshold=0.5) for key in self.augmenter.augment_types})
         self.test_ious = nn.ModuleDict({
             key: BinaryJaccardIndex(threshold=0.5) for key in self.augmenter.augment_types})
+        self.test_sync_ious = nn.ModuleDict({
+            key: BinaryJaccardIndex(threshold=0.5) for key in self.augmenter.augment_types})
         # For the combine distortion, which is random selected from these distortions
         self.test_bars['Combine'] = MultilabelAccuracy(num_labels=msg_len, threshold=0.5)
+        self.test_ious['Combine'] = BinaryJaccardIndex(threshold=0.5)
         self.test_ious['Combine'] = BinaryJaccardIndex(threshold=0.5)
         self.test_correct_ratio = Accumulation()
         # self.test_par = MultilabelAccuracy(num_labels=256*256, threshold=0.5)
 
         # Log model arch to file
+        image_size = self.model_cfg.image_shape[-2:]
         from torchinfo import summary
         log.info(f'Encoder Summary:\n'
-                 f'{summary(self.encoder, input_size=((1, 3, 256, 256), (1, 1, 256, 256), (1, msg_len)), depth=5, verbose=0)}')
+                 f'{summary(self.encoder, input_size=((1, 3, *image_size), (1, 1, *image_size), (1, msg_len)), depth=5, verbose=0)}')
         log.info(f'Decoder Summary:\n'
-                 f'{summary(self.decoder, input_size=((1, 3, 256, 256), (1, 1, 256, 256)), depth=5, verbose=0)}')
+                 f'{summary(self.decoder, input_size=((1, 3, *image_size), (1, 1, *image_size)), depth=5, verbose=0)}')
 
     def forward(self, x: torch.Tensor):
         raise NotImplementedError(f'Please use `encode` or `decode` methods instead.')
 
     def encode(self, image: torch.Tensor, mask: torch.Tensor, msg: torch.Tensor):
+        self.eval()
         if len(image.shape) == 3 and len(mask.shape) == 3 and len(msg.shape) == 1:
             image = image.unsqueeze(0)
             mask = mask.unsqueeze(0)
@@ -130,14 +135,17 @@ class ObjectWatermark2(LightningModule):
         container, residual = self.encoder(image, mask, msg, normalize=True)
         return container.squeeze(0), residual.squeeze(0)
 
+    def object_synchronize(self, container: torch.Tensor, mask: torch.Tensor, normalize: bool = True):
+        # TODO:
+        raise NotImplementedError
+
     def decode(self, container: torch.Tensor, mask: torch.Tensor):
+        self.eval()
         if len(container.shape) == 3 and len(mask.shape) == 3:
             container = container.unsqueeze(0)
             mask = mask.unsqueeze(0)
         assert len(container.shape) == 4 and len(mask.shape) == 4
-        # FIXME:
-        # sync_container, sync_mask = self.syncor(container, mask, normalize=True)
-        return self.decoder(container, mask, normalize=True).squeeze(0)
+        return self.decoder(container, mask, normalize=True).squeeze(0).sigmoid().ge(0.5).int()
 
     def on_train_start(self) -> None:
         # by default lightning executes validation step sanity checks before training starts,
@@ -211,6 +219,13 @@ class ObjectWatermark2(LightningModule):
                         object_mask.append(gt_mask)
                 object_mask = torch.stack(object_mask, dim=0)
             else:
+                object_mask = gt_masks
+
+            if self.model_cfg.adopt_all_seg_mask and self.model_cfg.adopt_all_gt_mask:
+                raise ValueError('Only one of `adopt_all_seg_mask` and `adopt_all_gt_mask` can be True.')
+            if self.model_cfg.adopt_all_seg_mask:
+                object_mask = pred_masks
+            if self.model_cfg.adopt_all_gt_mask:
                 object_mask = gt_masks
 
             sync_object_patch, sync_mask_patch = self.syncor(_aug_container, object_mask)
@@ -358,6 +373,10 @@ class ObjectWatermark2(LightningModule):
 
         # consider detaching tensors before returning them from `training_step()`
         # or using `on_train_epoch_end()` instead which doesn't accumulate outputs
+        self.train_bar.reset()
+        self.train_iou.reset()
+        self.train_ssim.reset()
+        self.train_psnr.reset()
         pass
 
     def validation_step(self, batch: Any, batch_idx: int):

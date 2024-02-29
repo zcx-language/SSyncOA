@@ -137,6 +137,12 @@ class StegaStampWoSTNDecoder(nn.Module):
 
         if self.mask_object == 'mask':
             image = image * mask
+        elif self.mask_object == 'random_mask':
+            # This aims to make the encoder to watermark the whole image, and this random mask operation \
+            # to optimze its robustness against object crop
+            for batch_idx in range(image.shape[0]):
+                if torch.rand(1).item() > 0.5:
+                    image[batch_idx] = image[batch_idx] * mask[batch_idx]
         elif self.mask_object == 'concat':
             image = torch.cat([mask, image], dim=1)
         elif self.mask_object == 'concat_down2_down4':

@@ -30,6 +30,7 @@ class DUTSDataset(Dataset):
     def __init__(self, data_dir: str,
                  image_shape: Tuple[int, int, int] = (3, 256, 256),
                  msg_len: int = 32,
+                 background_shape: Tuple[int, int, int] = (3, 512, 512),
                  num_backgrounds: int = 1,
                  stage: str = 'train',
                  random_translate: bool = False,    # Random translate the standard object and mask so that they are not centered in the image
@@ -39,21 +40,22 @@ class DUTSDataset(Dataset):
         data_dir = Path(data_dir)
         self.image_shape = image_shape
         self.msg_len = msg_len
+        self.background_shape = background_shape
         self.num_backgrounds = num_backgrounds
         self.random_translate = random_translate
         self.add_all_one_masks = add_all_one_masks
 
         if stage.lower() == 'train':
-            img_dir = data_dir / 'DUTS-TR' / 'Std-Image-30'
-            mask_dir = data_dir / 'DUTS-TR' / 'Std-Mask-30'
+            img_dir = data_dir / 'DUTS-TR' / 'Std-Image-30' / str(self.image_shape[-1])
+            mask_dir = data_dir / 'DUTS-TR' / 'Std-Mask-30' / str(self.image_shape[-1])
             mask_paths = list(mask_dir.glob('*.png'))
 
             if self.add_all_one_masks:
                 all_one_mask_dir = data_dir / 'DUTS-TR' / 'Std-Mask-30-All'
                 mask_paths += list(all_one_mask_dir.glob('*.png'))
         else:
-            img_dir = data_dir / 'DUTS-TE' / 'Std-Image-30'
-            mask_dir = data_dir / 'DUTS-TE' / 'Std-Mask-30'
+            img_dir = data_dir / 'DUTS-TE' / 'Std-Image-30' / str(self.image_shape[-1])
+            mask_dir = data_dir / 'DUTS-TE' / 'Std-Mask-30' / str(self.image_shape[-1])
             mask_paths = sorted(mask_dir.glob('*.png'))
 
             mask_num = len(mask_paths)
@@ -79,8 +81,6 @@ class DUTSDataset(Dataset):
         img_path = self.img_dir / f'{mask_path.stem}.jpg'
         img = cv2.cvtColor(cv2.imread(str(img_path)), cv2.COLOR_BGR2RGB)
         mask = cv2.threshold(cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE), 127, 255, cv2.THRESH_BINARY)[1]
-        orig_img = img.copy()
-        orig_mask = mask.copy()
 
         if self.random_translate:
             # Here, we manually translate the object while ensuring it is not out of the image
@@ -117,12 +117,13 @@ class DUTSDataset(Dataset):
         for _ in range(self.num_backgrounds):
             bg_img_path = random.choice(self.bg_image_paths)
             bg_img.append(self.to_tensor(
-                cv2.resize(cv2.cvtColor(cv2.imread(str(bg_img_path)), cv2.COLOR_BGR2RGB), (512, 512))))
+                cv2.resize(cv2.cvtColor(cv2.imread(str(bg_img_path)), cv2.COLOR_BGR2RGB), self.background_shape[-2:])))
         bg_img = torch.stack(bg_img, dim=0)
         # img: (3, H, W)
         # mask: (1, H, W)
         # msg: (self.num_backgrounds, len)
         # gb_img: (self.num_backgrounds, 3, 512, 512)
+        assert img.shape == self.image_shape and mask.shape == (1, *self.image_shape[-2:])
         return img, mask, msg, bg_img
 
 

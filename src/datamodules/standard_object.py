@@ -11,6 +11,7 @@
 # Import lib here
 import numpy as np
 import cv2
+import matplotlib.pyplot as plt
 from PIL import Image
 from pathlib import Path
 
@@ -57,6 +58,8 @@ def standard_object(image: np.ndarray, mask: np.ndarray):
     mask = np.pad(mask, ((top_pad, bottom_pad), (left_pad, right_pad)), mode='constant')
 
     # Calculate the angle of the object
+    # theta = np.degrees(np.arctan2(2 * moments['mu11'] / moments['m00'],
+    #                               (moments['mu20'] - moments['mu02']) / moments['m00']) / 2)
     theta = np.degrees(np.arctan2(2 * moments['mu11'], moments['mu20'] - moments['mu02']) / 2)
 
     # Rotate the image and mask
@@ -159,22 +162,34 @@ def standard_object(image: np.ndarray, mask: np.ndarray):
     # std_img = cv2.resize(pad_img, (256, 256))
     # std_mask = cv2.resize(pad_mask, (256, 256))
 
-    # plt.subplot(1, 2, 1)
-    # plt.imshow(crop_img)
-    # plt.subplot(1, 2, 2)
-    # plt.imshow(crop_mask, cmap='gray')
-    # plt.show()
-    # plt.close()
-    # input()
+    plt.subplot(2, 2, 1)
+    plt.imshow(image)
+    plt.subplot(2, 2, 2)
+    plt.imshow(mask, cmap='gray')
+    plt.subplot(2, 2, 3)
+    plt.imshow(crop_img)
+    plt.subplot(2, 2, 4)
+    plt.imshow(crop_mask, cmap='gray')
+    plt.show()
+    plt.close()
     return std_img, std_mask
 
 
 def run():
-    image_path = Path('/sda1/Datasets/DUTS/DUTS-TE/DUTS-TE-Image/ILSVRC2012_test_00000025.jpg')
-    mask_path = Path('/sda1/Datasets/DUTS/DUTS-TE/DUTS-TE-Mask/ILSVRC2012_test_00000025.png')
-    image = cv2.cvtColor(cv2.imread(str(image_path)), cv2.COLOR_BGR2RGB)
-    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-    std_img, std_mask = standard_object(image, mask)
+    image_path = Path('/sda1/Datasets/DUTS/DUTS-TE/DUTS-TE-Image/ILSVRC2012_test_00000026.jpg')
+    mask_path = Path('/sda1/Datasets/DUTS/DUTS-TE/DUTS-TE-Mask/ILSVRC2012_test_00000026.png')
+    for angle in range(0, 360, 30):
+        image = cv2.cvtColor(cv2.imread(str(image_path)), cv2.COLOR_BGR2RGB)
+        image = cv2.resize(image, (256, 256), interpolation=cv2.INTER_LINEAR)
+        # mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        mask[100:200, 100:200] = 255
+
+        # Rotate the image and mask
+        rotated_img = np.array(Image.fromarray(image).rotate(angle, resample=2, expand=True))
+        rotated_mask = np.array(Image.fromarray(mask).rotate(angle, resample=2, expand=True))
+
+        std_img, std_mask = standard_object(rotated_img, rotated_mask)
     pass
 
 

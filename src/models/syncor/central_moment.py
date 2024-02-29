@@ -182,7 +182,7 @@ class CentralMoment(nn.Module):
 
         if self.bbox_crop_out:
             std_imgs, std_masks = self.bbox_crop_out(std_imgs, std_masks)
-        return std_imgs, std_masks
+        return std_imgs, std_masks.ge(0.5).float()
 
 
 def run():

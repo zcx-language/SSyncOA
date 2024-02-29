@@ -52,23 +52,28 @@ class HiDDeNEncoder(nn.Module):
 
     def forward(self, img, mask, msg, normalize: bool = False):
         orig_img = img
-        img = img * mask
+
         if normalize:
             img = (img - 0.5) * 2
             msg = (msg - 0.5) * 2
+
+        img = img * mask
+
         batch_size, n_channels, height, width = img.shape
 
         # First, add two dummy dimensions in the end of the message.
         # This is required for the .expand to work correctly
         expanded_msg = self.msg_linear(msg).unsqueeze(-1).unsqueeze(-1)
-
         expanded_msg = expanded_msg.expand(-1, -1, height, width)
+        expanded_msg = expanded_msg * mask.repeat(1, expanded_msg.shape[1], 1, 1)
+
         conv_image = self.conv_layers(img)
         # concatenate expanded message and image
         concat = torch.cat([expanded_msg, conv_image, img], dim=1)
         conv_concat = self.after_concat_layer(concat)
         residual = self.final_layer(conv_concat)
-        return (residual * mask + orig_img).clamp(0, 1), residual * mask
+
+        return (residual + orig_img).clamp(0, 1), residual
 
 
 def run():

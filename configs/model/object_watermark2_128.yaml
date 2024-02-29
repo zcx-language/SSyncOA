@@ -164,14 +164,14 @@ augmenter:
       std: 0.05
     JPEG50:
       _target_: src.models.augmenter.DiffJPEG.DiffJPEG.DiffJPEG
-      height: 512
-      width: 512
+      height: 256
+      width: 256
       differentiable: True
       quality: 50
     JPEG75:
       _target_: src.models.augmenter.DiffJPEG.DiffJPEG.DiffJPEG
-      height: 512
-      width: 512
+      height: 256
+      width: 256
       differentiable: True
       quality: 75
 
@@ -188,7 +188,7 @@ syncor:
   # in_channels: 1
   # output_size: [256, 256]
   _target_: src.models.syncor.CentralMoment
-  output_size: [256, 256]
+  output_size: [128, 128]
   random_translate: False
   random_scale: False
   random_rotate: False

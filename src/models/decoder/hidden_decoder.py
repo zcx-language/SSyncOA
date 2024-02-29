@@ -54,10 +54,10 @@ class HiDDeNDecoder(nn.Module):
         self.linear = nn.Linear(msg_len, msg_len)
 
     def forward(self, img, mask, normalize: bool = False):
-        img = img * mask
         if normalize:
             img = (img - 0.5) * 2
 
+        img = img * mask
         x = self.layers(img)
         x = self.linear(x.squeeze(dim=(2, 3)))
         return x

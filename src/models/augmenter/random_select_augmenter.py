@@ -62,9 +62,8 @@ class RandomSelectAugmenter:
             aug_container = aug_container * aug_mask + background_image * (1 - aug_mask)
         else:
             # Here, we manually translate the object so that it is not out of the image
-            # 100 ~ 128 = (512 - 256) / 2
-            h_shift = np.random.randint(-100, 100)
-            w_shift = np.random.randint(-100, 100)
+            h_shift = np.random.randint(-(bg_height-co_height)//2, (bg_height-co_height)//2)
+            w_shift = np.random.randint(-(bg_width-co_width)//2, (bg_width-co_width)//2)
             aug_container = torch.roll(aug_container, shifts=(h_shift, w_shift), dims=(-2, -1))
             aug_mask = torch.roll(aug_mask, shifts=(h_shift, w_shift), dims=(-2, -1))
             aug_container = aug_container * aug_mask + background_image * (1 - aug_mask)

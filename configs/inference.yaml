@@ -2,7 +2,7 @@
 
 defaults:
   - _self_
-  - datamodule: duts_datamodule.yaml
+  # - datamodule: duts_datamodule.yaml
   - model: object_watermark2.yaml
   - callbacks: default.yaml
   - logger: tensorboard.yaml # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
@@ -16,4 +16,9 @@ task_name: "inference"
 tags: ["dev"]
 
 # passing checkpoint path is necessary for evaluation
+is_encode: False
+is_decode: False
+is_augment: False
+input_dir: ???
+output_dir: null
 ckpt_path: ???
