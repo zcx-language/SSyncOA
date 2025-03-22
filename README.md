@@ -1,5 +1,3 @@
-<div align="center">
-
 # SSyncOA: Self-synchronizing Object-aligned Watermarking to Resist Crop-paste Attacks
 
 [![python](https://img.shields.io/badge/-Python_3.8_%7C_3.9_%7C_3.10-blue?logo=python&logoColor=white)](https://github.com/pre-commit/pre-commit)
