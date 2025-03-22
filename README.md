@@ -5,7 +5,6 @@
 [![lightning](https://img.shields.io/badge/-Lightning_2.0+-792ee5?logo=pytorchlightning&logoColor=white)](https://pytorchlightning.ai/)
 [![hydra](https://img.shields.io/badge/Config-Hydra_1.3-89b8cd)](https://hydra.cc/)
 
-
 ## 📌  Introduction
 
 Modern image processing tools have made it easy for attackers to crop the region or object of interest in images and paste it into other images. The challenge this cropping-paste attack poses to the watermarking technology is that it breaks the synchronization of the image watermark, introducing multiple superimposed desynchronization distortions, such as rotation, scaling, and translation. However, current watermarking methods can only resist a single type of desynchronization and cannot be applied to protect the object's copyright under the cropping-paste attack. With the finding that the key to resisting the cropping-paste attack lies in robust features of the object to protect, this paper proposes a self-synchronizing object-aligned watermarking method, called SSyncOA. Specifically, we first constrain the watermarked region to be aligned with the protected object, and then synchronize the watermark's translation, rotation, and scaling distortions by normalizing the object invariant features, i.e., its centroid, principal orientation, and minimum bounding square, respectively. To make the watermark embedded in the protected object, we introduce the object-aligned watermarking model, which incorporates the real cropping-paste attack into the encoder-noise layer-decoder pipeline and is optimized end-to-end. Besides, we illustrate the effect of different desynchronization distortions on the watermark training, which confirms the necessity of the self-synchronization process. Extensive experiments demonstrate the superiority of our method over other SOTAs.
@@ -73,8 +72,8 @@ The directory structure of new project looks like this:
 
 ```bash
 # clone project
-git clone https://github.com/ashleve/lightning-hydra-template
-cd lightning-hydra-template
+git clone https://github.com/zcx-language/SSyncOA
+cd SSyncOA
 
 # [OPTIONAL] create conda environment
 conda create -n myenv python=3.9
